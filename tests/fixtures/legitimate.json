@@ -1,0 +1,27 @@
+[
+  {
+    "id": "leg_001",
+    "label": "normal_bug_report",
+    "text": "When I click the submit button on the login form, nothing happens. The console shows a TypeError: Cannot read property 'value' of null."
+  },
+  {
+    "id": "leg_002",
+    "label": "feature_request",
+    "text": "It would be great if the dashboard had a dark mode option. Many users work late and find the bright white UI straining."
+  },
+  {
+    "id": "leg_003",
+    "label": "pr_description",
+    "text": "This PR fixes the race condition in the task scheduler by adding a mutex around the shared queue. Resolves #42."
+  },
+  {
+    "id": "leg_004",
+    "label": "readme_content",
+    "text": "# My Project\n\nThis project provides a REST API for managing user tasks.\n\n## Installation\n\n```bash\npip install -r requirements.txt\n```\n\n## Usage\n\nRun `python main.py` to start the server."
+  },
+  {
+    "id": "leg_005",
+    "label": "technical_discussion",
+    "text": "The current database schema does not support soft deletes. We should add a `deleted_at` timestamp column to the users table and update the ORM queries accordingly."
+  }
+]
