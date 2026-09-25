@@ -57,10 +57,15 @@ class L2WatsonxDetector(BaseDetector):
     # Maximum characters sent to the model (truncated if longer).
     _MAX_CHARS = 4000
 
+    # Placeholder values written by .env.example — treated the same as absent.
+    _PLACEHOLDER_KEYS: frozenset[str] = frozenset(
+        {"your_watsonx_api_key_here", "YOUR_WATSONX_API_KEY", ""}
+    )
+
     def scan(self, content: UntrustedContent) -> DetectionResult:
-        if not settings.watsonx_api_key:
-            log.warning(
-                "WATSONX_API_KEY not set — L2 detector returning SAFE (stub mode).",
+        if settings.watsonx_api_key in self._PLACEHOLDER_KEYS:
+            log.debug(
+                "WATSONX_API_KEY not configured — L2 detector skipped.",
                 extra={"content_id": str(content.id)},
             )
             return self._make_result(
@@ -73,15 +78,16 @@ class L2WatsonxDetector(BaseDetector):
         try:
             return self._call_watsonx(content)
         except Exception as exc:  # noqa: BLE001
-            log.error(
-                "L2 watsonx call failed; defaulting to SAFE.",
+            # Non-fatal: L1 already ran; log at WARNING so L1 findings dominate.
+            log.warning(
+                "L2 watsonx call failed — L1 result is authoritative.",
                 extra={"content_id": str(content.id), "error": str(exc)},
             )
             return self._make_result(
                 content,
                 is_flagged=False,
                 risk_level=RiskLevel.SAFE,
-                explanation=f"L2 detector error: {exc}",
+                explanation=f"L2 detector unavailable: {exc}",
             )
 
     # ── Internal ──────────────────────────────────────────────────────────────

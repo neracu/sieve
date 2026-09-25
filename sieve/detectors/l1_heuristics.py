@@ -25,23 +25,39 @@ from sieve.detectors.base import BaseDetector
 _Pattern = tuple[re.Pattern[str], str, bool]
 
 INJECTION_PATTERNS: list[_Pattern] = [
-    # Direct instruction overrides
+    # ── Direct instruction overrides ─────────────────────────────────────────
     (re.compile(r"ignore\s+(all\s+)?previous\s+instructions?", re.I), "ignore_previous_instructions", True),
-    (re.compile(r"disregard\s+(all\s+)?prior\s+(instructions?|context)", re.I), "disregard_prior_instructions", True),
+    (re.compile(r"ignore\s+(all\s+)?prior\s+(instructions?|rules?|context)", re.I), "ignore_prior_instructions", True),
+    (re.compile(r"disregard\s+(all\s+)?prior\s+(instructions?|context|rules?)", re.I), "disregard_prior_instructions", True),
     (re.compile(r"forget\s+(everything|all)\s+(you.ve\s+)?learned", re.I), "forget_learned_context", True),
-    # Role/persona hijacking
+    (re.compile(r"disregard\s+rules?", re.I), "disregard_rules", True),
+    # ── System / AI override commands ────────────────────────────────────────
+    (re.compile(r"system\s+override", re.I), "system_override", True),
+    (re.compile(r"override\s+(all\s+)?(previous|prior|system|safety)\s+\w+", re.I), "override_directive", True),
+    (re.compile(r"new\s+(system\s+)?instructions?\s*:", re.I), "new_instructions_directive", True),
+    # ── Role/persona hijacking ────────────────────────────────────────────────
     (re.compile(r"you\s+are\s+now\s+(a|an)\s+\w+", re.I), "role_reassignment", False),
     (re.compile(r"act\s+as\s+(a|an|if)\s+", re.I), "act_as_persona", False),
     (re.compile(r"pretend\s+(you\s+are|to\s+be)\s+", re.I), "pretend_persona", False),
-    # System-prompt leakage probes
+    # ── System-prompt leakage probes ─────────────────────────────────────────
     (re.compile(r"reveal\s+(your\s+)?(system\s+)?prompt", re.I), "reveal_system_prompt", True),
     (re.compile(r"print\s+(your\s+)?(full\s+)?system\s+(prompt|instructions?)", re.I), "print_system_prompt", True),
-    # Data exfiltration triggers
+    (re.compile(r"print\s+secrets?", re.I), "print_secrets", True),
+    (re.compile(r"output\s+secrets?", re.I), "output_secrets", True),
+    (re.compile(r"output\s+(base64|encoded)\s+\w+", re.I), "output_encoded", True),
+    # ── Env / credential file exfiltration ───────────────────────────────────
+    (re.compile(r"read\s+\.env", re.I), "read_dotenv", True),
+    (re.compile(r"send\s+\.env", re.I), "send_dotenv", True),
+    (re.compile(r"(print|output|leak|dump|expose)\s+(the\s+)?(\.env|env\s+file|environment\s+variables?)", re.I), "exfil_dotenv", True),
+    # ── Credential / secret exfiltration ─────────────────────────────────────
     (re.compile(r"send\s+(all\s+)?(data|secrets?|tokens?|keys?)\s+to\s+", re.I), "exfiltrate_data", True),
+    (re.compile(r"leak\s+(api\s+)?keys?", re.I), "leak_api_keys", True),
+    (re.compile(r"leak\s+(credentials?|secrets?|tokens?|passwords?)", re.I), "leak_credentials", True),
+    (re.compile(r"(dump|expose|extract)\s+(all\s+)?(secrets?|credentials?|api\s*keys?|tokens?)", re.I), "dump_secrets", True),
     (re.compile(r"http[s]?://[^\s]+\?.*?(key|token|secret|password)=", re.I), "exfil_url_param", True),
-    # Privilege escalation
+    # ── Privilege escalation ──────────────────────────────────────────────────
     (re.compile(r"(run|execute|eval)\s+(as\s+)?(root|admin|sudo|superuser)", re.I), "privilege_escalation", True),
-    # CRLF / header injection indicators
+    # ── CRLF / header injection ───────────────────────────────────────────────
     (re.compile(r"(\r\n|\n){2,}.*(content-type|set-cookie|location):", re.I), "header_injection", True),
 ]
 

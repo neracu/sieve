@@ -130,11 +130,11 @@ class QuarantineWrapper:
     @staticmethod
     def _default_detectors() -> list:
         from sieve.detectors.l1_heuristics import L1HeuristicDetector
+        from sieve.detectors.l2_watsonx import L2WatsonxDetector
 
+        _PLACEHOLDER_KEYS = L2WatsonxDetector._PLACEHOLDER_KEYS
         detectors: list = [L1HeuristicDetector()]
-        if settings.watsonx_api_key:
-            from sieve.detectors.l2_watsonx import L2WatsonxDetector
-
+        if settings.watsonx_api_key not in _PLACEHOLDER_KEYS:
             detectors.append(L2WatsonxDetector())
         return detectors
 
