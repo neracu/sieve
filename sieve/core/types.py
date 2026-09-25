@@ -39,6 +39,24 @@ class ActionTaken(str, Enum):
     PENDING_APPROVAL = "PENDING_APPROVAL"
 
 
+class HookExecutionStatus(str, Enum):
+    """High-level outcome returned by a guard hook to the caller.
+
+    Maps from the lower-level :class:`ActionTaken` / :class:`RiskLevel` pair
+    onto a simpler three-way signal that gate logic can act on directly:
+
+    - ``CLEAN``       — content is safe; pass it to the agent unchanged.
+    - ``QUARANTINED`` — injection patterns found; content is wrapped with a
+                        warning header but the agent may still read it.
+    - ``BLOCKED``     — content is so dangerous that the agent must NOT read
+                        it; the pipeline should raise or abort the tool call.
+    """
+
+    CLEAN = "CLEAN"
+    QUARANTINED = "QUARANTINED"
+    BLOCKED = "BLOCKED"
+
+
 # ── Core domain models ────────────────────────────────────────────────────────
 
 
@@ -105,3 +123,24 @@ class ApprovalRequest(BaseModel):
     resolved_by: str | None = None
 
     model_config = {"frozen": False}
+
+
+class HookExecutionResult(BaseModel):
+    """Structured result returned by every guard hook.
+
+    Callers (MCP server, approval gate, dashboard) consume this rather than
+    working with the lower-level :class:`~sieve.quarantine.wrapper.ScanResult`
+    directly.
+    """
+
+    status: HookExecutionStatus
+    source: ContentSource
+    # The raw dict received from the upstream API (GitHub, etc.).
+    original_payload: dict[str, Any]
+    # Text that is safe to hand to the agent (may be quarantine-wrapped).
+    processed_content: str
+    # Aggregated detection result (highest-risk detector wins).
+    detection_result: DetectionResult
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"frozen": True}
