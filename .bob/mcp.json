@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sieve-security-guardian": {
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": ["-m", "sieve.mcp.server"]
+    }
+  }
+}

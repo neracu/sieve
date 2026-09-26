@@ -121,6 +121,7 @@ class QuarantineWrapper:
         detectors: list | None = None,
         threshold: RiskLevel | None = None,
         l2_score_threshold: float | None = None,
+        audit_logger: object | None = None,
     ) -> None:
         """Initialise the wrapper.
 
@@ -138,6 +139,8 @@ class QuarantineWrapper:
                                 overriding the detector's own risk-level
                                 mapping.  Defaults to
                                 ``settings.l2_score_threshold``.
+            audit_logger:       Writer for non-clean decisions. Defaults to
+                                the module singleton.
         """
         from sieve.quarantine.audit_log import audit_logger as _default_audit
 
@@ -152,7 +155,7 @@ class QuarantineWrapper:
             if l2_score_threshold is not None
             else settings.l2_score_threshold
         )
-        self._audit = _default_audit
+        self._audit = _default_audit if audit_logger is None else audit_logger
 
     # ── Public API ────────────────────────────────────────────────────────────
 

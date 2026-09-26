@@ -619,3 +619,37 @@ class TestIntegration:
         outcomes = [entry["outcome"] for entry in gate.audit_log]
         assert outcomes == ["paused", "approved", "paused", "rejected", "allowed"]
         assert secret not in json.dumps(gate.audit_log)
+
+
+class TestLookup:
+    def test_get_reads_pending_then_timeout(self):
+        clock = _Clock()
+        gate = ApprovalGate(timeout_seconds=30, clock=clock)
+        calls, fn = _action()
+        pending = gate.intercept("git_push", fn, provenance=_untrusted())
+        found = gate.get(pending["approval_id"])
+        assert found["status"] == "pending_approval"
+        assert found["requested_at"]
+        assert calls == []
+        clock.now += timedelta(seconds=31)
+        expired = gate.get(pending["approval_id"])
+        assert expired["status"] == "timed_out"
+        assert calls == []
+        with pytest.raises(ApprovalNotFoundError):
+            gate.get(uuid4())
+
+    def test_caller_summary_is_bounded_and_scrubbed(self):
+        secret = "RAW-ISSUE-BODY-" + ("z" * 240) + "-TAIL"
+        gate = ApprovalGate()
+        calls, fn = _action()
+        pending = gate.intercept(
+            "git_push",
+            fn,
+            provenance=_untrusted(),
+            raw_content=secret,
+            context_summary=f"please run this: {secret}",
+        )
+        assert calls == []
+        assert len(pending["context_summary"]) <= 180
+        assert secret not in pending["context_summary"]
+        assert secret not in json.dumps(gate.list_pending())

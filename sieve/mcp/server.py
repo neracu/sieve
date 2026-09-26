@@ -18,14 +18,9 @@ Exposes the following MCP tools to a connected AI agent:
 - ``sieve_approve``      — Approve a pending action.
 - ``sieve_deny``         — Deny a pending action.
 
-Run with::
-
-    python -m sieve.mcp.server          # stdio transport (default)
-    python -m sieve.mcp.server --sse    # SSE transport on port 8080
-
-TODO: Install the ``mcp`` package (``pip install mcp``) and replace the
-      stub ``register_tool`` calls below with the real MCP SDK API once the
-      dependency is finalised.
+``python -m sieve.mcp.server`` starts the Security Guardian MCP server
+(stdio). ``--http`` serves the same tools over streamable HTTP. The functions
+below remain the legacy dispatcher for host-tool quarantine tests.
 """
 
 from __future__ import annotations
@@ -38,7 +33,6 @@ from sieve.core.config import settings
 from sieve.core.logger import configure_logging, get_logger
 from sieve.core.types import ContentSource, UntrustedContent
 
-configure_logging(level=settings.log_level, fmt=settings.log_format)
 log = get_logger(__name__)
 
 
@@ -395,7 +389,8 @@ def _serialize_response(response: dict) -> str:
 
 
 def _stdio_loop() -> None:
-    """Minimal JSON-RPC stdio loop (stub — replace with real MCP SDK)."""
+    """Legacy JSON-RPC stdio loop used by fail-closed handler tests."""
+    configure_logging(level=settings.log_level, fmt=settings.log_format)
     log.info("Sieve MCP server starting (stdio).")
     for line in sys.stdin:
         line = line.strip()
@@ -406,4 +401,6 @@ def _stdio_loop() -> None:
 
 
 if __name__ == "__main__":
-    _stdio_loop()
+    from sieve.mcp.guardian import main
+
+    main()

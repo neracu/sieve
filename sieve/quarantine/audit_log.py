@@ -58,6 +58,25 @@ log = get_logger(__name__)
 
 # Sentinel value used by tests to suppress all file I/O.
 _AUDIT_LOG_DISABLED = ""
+# In-memory window so callers can read recent decisions without the file.
+_RECENT_MAX = 200
+
+
+def detector_label(fired: list[str]) -> str:
+    """Collapse detector names to ``L1``, ``L2``, ``both``, or the first name."""
+    names = [str(name) for name in fired if name]
+    has_l1 = any("l1" in name.lower() or name.lower() == "l1heuristicdetector" for name in names)
+    has_l2 = any(
+        "l2" in name.lower() or name.lower() in ("l2compositedetector", "l2watsonxdetector")
+        for name in names
+    )
+    if has_l1 and has_l2:
+        return "both"
+    if has_l1:
+        return "L1"
+    if has_l2:
+        return "L2"
+    return names[0] if names else "unknown"
 
 
 class AuditLogger:
@@ -77,10 +96,11 @@ class AuditLogger:
             path = getattr(settings, "audit_log_path", "sieve_audit.log")
         self._path = path
         self._lock = threading.Lock()
+        self._recent: list[dict] = []
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def record(self, scan: "ScanResult") -> None:
+    def record(self, scan: ScanResult) -> None:
         """Write an audit entry for a blocked or quarantined *scan* result.
 
         Safe to call from any thread.  Silently swallows I/O errors so that
@@ -95,15 +115,18 @@ class AuditLogger:
             return  # Only record non-clean decisions.
 
         entry = self._build_entry(scan)
+        with self._lock:
+            self._recent.append(entry)
+            if len(self._recent) > _RECENT_MAX:
+                del self._recent[: len(self._recent) - _RECENT_MAX]
         if not self._path or self._path == _AUDIT_LOG_DISABLED:
-            return  # Disabled — nothing to write.
+            return  # Disabled — memory still holds the safe entry.
 
         try:
             line = json.dumps(entry, default=str) + "\n"
-            with self._lock:
-                with Path(self._path).open("a", encoding="utf-8") as fh:
-                    fh.write(line)
-                    fh.flush()
+            with self._lock, Path(self._path).open("a", encoding="utf-8") as fh:
+                fh.write(line)
+                fh.flush()
         except Exception as exc:  # noqa: BLE001
             # Audit log failure must never block the main pipeline.
             log.warning(
@@ -111,10 +134,19 @@ class AuditLogger:
                 extra={"path": self._path, "error": str(exc)},
             )
 
+    def recent(self, limit: int = 50) -> list[dict]:
+        """Newest safe entries first. Raw content is never stored here."""
+        size = limit if isinstance(limit, int) and not isinstance(limit, bool) else 50
+        size = max(0, min(size, _RECENT_MAX))
+        with self._lock:
+            window = list(self._recent[-size:])
+        window.reverse()
+        return [dict(item) for item in window]
+
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _build_entry(scan: "ScanResult") -> dict:
+    def _build_entry(scan: ScanResult) -> dict:
         """Construct the audit log dict from *scan*.
 
         Raw content is intentionally omitted.  Only forensic metadata is
@@ -122,28 +154,11 @@ class AuditLogger:
         controls while the actual raw payload stays in a separate secure
         store.
         """
-        # Detector label: "L1", "L2", or "both"
-        fired = list(scan.detectors_fired)
-        has_l1 = any("l1" in d.lower() or d.lower() == "l1heuristicdetector" for d in fired)
-        has_l2 = any(
-            "l2" in d.lower()
-            or d.lower() in ("l2compositedetector", "l2watsonxdetector")
-            for d in fired
-        )
-        if has_l1 and has_l2:
-            detector_label = "both"
-        elif has_l1:
-            detector_label = "L1"
-        elif has_l2:
-            detector_label = "L2"
-        else:
-            detector_label = fired[0] if fired else "unknown"
-
         return {
             "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "event": scan.status.value,
             "source": scan.content.source.value,
-            "detector": detector_label,
+            "detector": detector_label(scan.detectors_fired),
             "risk_score": scan.risk_score,
             "detected_patterns": list(scan.incident_log.detected_patterns),
             "content_id": str(scan.content.id),

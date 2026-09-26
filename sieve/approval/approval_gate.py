@@ -59,6 +59,7 @@ _PENDING_KEYS = (
     "source",
     "context_summary",
     "approval_id",
+    "requested_at",
 )
 
 _current_provenance: ContextVar[Provenance | None] = ContextVar(
@@ -160,6 +161,7 @@ class _Pending:
             "source": _scrub(self.provenance.source or "untrusted", secret),
             "context_summary": _scrub(self.context_summary, secret),
             "approval_id": self.approval_id,
+            "requested_at": self.created_at.isoformat(),
         }
         if self.status == "approved":
             payload["result"] = self.result
@@ -372,6 +374,7 @@ class ApprovalGate:
         provenance: Provenance | None = None,
         mode: str = "async",
         raw_content: str | None = None,
+        context_summary: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """Run *fn* or pause it.
@@ -379,6 +382,10 @@ class ApprovalGate:
         Async mode returns the pending confirmation dict and does not call
         *fn*. Sync mode prints a prompt and waits for y/n (or *input_fn*).
         Trusted and non-privileged actions return *fn*'s result directly.
+
+        *context_summary*, when set, replaces the generated summary after it
+        is collapsed to one line, capped, and scrubbed. The action's risk
+        tier still comes from the registry, not from the caller.
         """
         spec = self.resolve(action_id)
         origin = self._resolve_provenance(provenance)
@@ -408,6 +415,8 @@ class ApprovalGate:
             created_at=created,
             expires_at=created + timedelta(seconds=seconds),
         )
+        if context_summary is not None and str(context_summary).strip():
+            record.context_summary = _bound_summary(str(context_summary), record.raw_content)
         with self._lock:
             self._store[record.approval_id] = record
             self._audit_locked(record, "paused", None)
@@ -485,6 +494,23 @@ class ApprovalGate:
                 for record in self._store.values()
                 if record.status == "pending_approval"
             ]
+
+    def get(self, approval_id: str | UUID) -> dict[str, Any]:
+        """Return one scrubbed payload, applying the timeout rule first.
+
+        Raises :class:`ApprovalNotFoundError` when *approval_id* is unknown.
+        Does not approve, reject, or run the paused action.
+        """
+        key = str(approval_id)
+        with self._lock:
+            record = self._store.get(key)
+            if record is None:
+                raise ApprovalNotFoundError(key)
+            if record.status == "pending_approval" and self._expired(record):
+                record.status = "timed_out"
+                record.approver = None
+                self._audit_locked(record, "timed_out", None)
+            return record.public()
 
     @property
     def audit_log(self) -> list[dict[str, Any]]:
@@ -777,6 +803,18 @@ def _safe_content_id(value: str | None) -> str | None:
     if _UUID_RE.fullmatch(text):
         return text
     return None
+
+
+_SUMMARY_LIMIT = 180
+
+
+def _bound_summary(summary: str, secret: str | None) -> str:
+    """One line, capped, with any raw content replaced."""
+    text = " ".join(str(summary).split())
+    text = _scrub(text, secret)
+    if len(text) <= _SUMMARY_LIMIT:
+        return text
+    return text[: _SUMMARY_LIMIT - 1].rstrip() + "…"
 
 
 def _context_summary(spec: ActionSpec, provenance: Provenance) -> str:

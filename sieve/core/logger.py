@@ -50,7 +50,7 @@ class _TextFormatter(logging.Formatter):
         return f"{prefix}  {record.getMessage()}"
 
 
-def configure_logging(level: str = "INFO", fmt: str = "text") -> None:
+def configure_logging(level: str = "INFO", fmt: str = "text", stream=None) -> None:
     """Configure the root logger for Sieve.
 
     Call this once at application startup (e.g. in the MCP server entry point
@@ -59,8 +59,10 @@ def configure_logging(level: str = "INFO", fmt: str = "text") -> None:
     Args:
         level: Python logging level string (``"DEBUG"``, ``"INFO"``, …).
         fmt:   ``"json"`` or ``"text"``.
+        stream: Destination for log records. Defaults to stdout. The MCP
+                stdio server passes stderr so protocol frames stay clean.
     """
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(sys.stdout if stream is None else stream)
     if fmt == "json":
         handler.setFormatter(_JsonFormatter())
     else:

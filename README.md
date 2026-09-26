@@ -139,6 +139,12 @@ All patterns are configurable in [`sieve/detectors/l1_heuristics.py`](sieve/dete
 
 ---
 
+## Security Guardian mode
+
+Bob can call this pipeline as an MCP server instead of hardcoding the checks into its own tools. The **Security Guardian** custom mode tells Bob to quarantine untrusted GitHub and web content, then wait for an operator approval before a privileged action that came from that content.
+
+Setup, the mode switch, and the demo script are in [docs/security_guardian.md](docs/security_guardian.md). Start the server with `make run-mcp` or `python mcp_server.py`.
+
 ## License
 
 MIT © IBM Hackathon Team
