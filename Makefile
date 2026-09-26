@@ -34,9 +34,9 @@ lint:
 lint-fix:
 	$(RUFF) check --fix sieve/ tests/
 
-## run-dashboard: start the FastAPI dashboard (development mode)
+## run-dashboard: start the incident dashboard (polls the HTTP MCP server)
 run-dashboard:
-	$(UVICORN) sieve.dashboard.api:app \
+	$(UVICORN) sieve.dashboard.dashboard_backend:app \
 		--host $${DASHBOARD_HOST:-127.0.0.1} \
 		--port $${DASHBOARD_PORT:-8000} \
 		--reload

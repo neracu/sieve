@@ -330,11 +330,15 @@ def audit_log_resource(runtime: GuardianRuntime) -> dict[str, Any]:
         entries.append(
             _project(
                 {
+                    "kind": "quarantine",
                     "timestamp": item.get("timestamp"),
                     "source": item.get("source"),
                     "decision": item.get("event"),
                     "detector": item.get("detector"),
                     "outcome": item.get("event"),
+                    "content_id": item.get("content_id"),
+                    "risk_score": item.get("risk_score"),
+                    "reason": item.get("reason"),
                 }
             )
         )
@@ -342,11 +346,15 @@ def audit_log_resource(runtime: GuardianRuntime) -> dict[str, Any]:
         entries.append(
             _project(
                 {
+                    "kind": "approval",
                     "timestamp": item.get("timestamp"),
                     "source": item.get("source"),
                     "decision": item.get("action"),
                     "action": item.get("action"),
                     "outcome": item.get("outcome"),
+                    "approval_id": item.get("approval_id"),
+                    "risk_tier": item.get("risk_tier"),
+                    "context_summary": item.get("context_summary"),
                 }
             )
         )

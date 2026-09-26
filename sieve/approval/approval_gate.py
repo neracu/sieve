@@ -706,6 +706,7 @@ class ApprovalGate:
             "risk_tier": record.spec.risk_tier,
             "source": record.provenance.source,
             "approval_id": record.approval_id,
+            "context_summary": record.context_summary,
         }
         secret = record.raw_content
         entry = {key: _scrub(value, secret) if isinstance(value, str) else value for key, value in entry.items()}

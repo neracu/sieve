@@ -145,6 +145,26 @@ Bob can call this pipeline as an MCP server instead of hardcoding the checks int
 
 Setup, the mode switch, and the demo script are in [docs/security_guardian.md](docs/security_guardian.md). Start the server with `make run-mcp` or `python mcp_server.py`.
 
+## Incident dashboard
+
+`make run-dashboard` serves the live incident feed on `http://127.0.0.1:8000`. It does not detect or approve anything itself. About once a second it reads `resource://audit-log` and `resource://pending-approvals` from the Security Guardian HTTP server and merges them into one list. `GET /incidents` reads that in-memory list. `GET /incidents/stream` pushes the same updates as server-sent events (`curl -N http://127.0.0.1:8000/incidents/stream`). `max_seconds` closes that stream after a short bound and is only for tests.
+
+The MCP server has to be the HTTP one, because that is the process the dashboard can attach to:
+
+```bash
+python mcp_server.py --http          # 127.0.0.1:8081
+make run-dashboard                   # 127.0.0.1:8000
+```
+
+Bob's stdio server is a separate process. Point `SIEVE_MCP_URL` at whichever HTTP server should feed the dashboard (default `http://127.0.0.1:8081/mcp`).
+
+| Variable | Default | Description |
+|---|---|---|
+| `SIEVE_MCP_URL` | `http://127.0.0.1:8081/mcp` | Security Guardian streamable HTTP endpoint |
+| `SIEVE_INCIDENTS_PATH` | `sieve_incidents.jsonl` | Append-only copy of the merged incidents |
+| `SIEVE_DASHBOARD_CORS_ORIGINS` | `*` | Comma-separated browser origins allowed to call the API. `*` lets a local frontend on any port reach the demo |
+| `SIEVE_DASHBOARD_REFRESH_SECONDS` | `1` | How often the dashboard re-reads the MCP resources |
+
 ## License
 
 MIT © IBM Hackathon Team
