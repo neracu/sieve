@@ -94,7 +94,10 @@ _RE_OUTPUT_ENCODED = re.compile(r"output\s+(base64|encoded)\s+\w+", re.I)
 _RE_READ_DOTENV = re.compile(r"read\s+\.env", re.I)
 _RE_SEND_DOTENV = re.compile(r"send\s+\.env", re.I)
 _RE_EXFIL_DOTENV = re.compile(
-    r"(print|output|leak|dump|expose)\s+(the\s+)?(\.env|env\s+file|environment\s+variables?)", re.I
+    r"(print|output|show|reveal|leak|dump|expose)\s+"
+    r"(the\s+)?(contents?\s+of\s+)?"
+    r"(\.env|env\s+file|environment\s+variables?)",
+    re.I,
 )
 
 # ── Category 6: Credential / secret exfiltration ─────────────────────────────
@@ -141,13 +144,14 @@ _RE_MD_ANGLE_COMMENT = re.compile(
 
 # Run of ≥ 2 zero-width characters is suspicious; ≥ 4 is malicious
 _ZERO_WIDTH_CHARS = "\u200b\u200c\u200d\ufeff\u2060\u00ad\u180e"
+_RE_ZW_CHARS = re.compile(f"[{re.escape(_ZERO_WIDTH_CHARS)}]")
 _RE_ZW_RUN_2 = re.compile(f"[{re.escape(_ZERO_WIDTH_CHARS)}]{{2,}}")
 _RE_ZW_RUN_4 = re.compile(f"[{re.escape(_ZERO_WIDTH_CHARS)}]{{4,}}")
 
 # ── Category 10: Encoded / obfuscated payloads ───────────────────────────────
 
 # Base64 blob ≥ 40 chars that decodes to printable text containing injection keywords
-_RE_B64_BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
+_RE_B64_BLOB = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
 
 # ── Category 11: System-bracket prefixes & fake errors ───────────────────────
 
@@ -189,8 +193,12 @@ _RE_GUARDRAILS_DISABLED = re.compile(r"guardrails?\s+(disabled?|removed?|bypasse
 # ── Category 13b: Command execution triggers ─────────────────────────────────
 
 _RE_EXEC_COMMAND = re.compile(
-    r"(execute|run|invoke|call)\s+(a\s+)?(shell|bash|cmd|powershell|command|script)", re.I
+    r"\b(execute|run|invoke|call)\s+"
+    r"(?:(?:a|this|that|these|those|the|your|my)\s+)?"
+    r"(shell|bash|cmd|powershell|command|script)\b",
+    re.I,
 )
+_TRAILING_QUALIFIERS = frozenset({"shown", "below", "used", "described"})
 _RE_EXEC_EVAL = re.compile(r"\beval\s*\(", re.I)
 
 # ── Category 14: CRLF / header injection ─────────────────────────────────────
@@ -273,6 +281,23 @@ _SCORE_PER_MALICIOUS  = 0.15   # each malicious hit
 _SCORE_PER_SUSPICIOUS = 0.10   # each suspicious hit
 _SCORE_MALICIOUS_FLOOR = 0.70  # minimum score when any malicious hit occurs
 
+# Command-verb rules that a nearby negation should not promote to MALICIOUS.
+_NEGATABLE_COMMAND_LABELS = frozenset({
+    "execute_command",
+    "eval_call",
+    "privilege_escalation",
+})
+_NEGATION_TOKENS = frozenset({
+    "not",
+    "never",
+    "don't",
+    "dont",
+    "won't",
+    "wont",
+    "shouldn't",
+    "shouldnt",
+})
+
 # Risk thresholds (score-based, matching task spec)
 _THRESHOLD_MALICIOUS  = 0.70
 _THRESHOLD_SUSPICIOUS = 0.30
@@ -302,11 +327,13 @@ def _extract_hidden_text(text: str) -> tuple[list[str], list[tuple[str, str]]]:
     extracted: list[str] = []
     structural: list[tuple[str, str]] = []
 
-    # HTML comments
+    # HTML comments. The label only fires when the body matches an injection
+    # phrase — the same check the composite structural signal uses.
     for m in _RE_HTML_COMMENT.finditer(text):
         inner = m.group(0)
         extracted.append(inner)
-        structural.append((_HTML_COMMENT_LABEL, inner[:80]))
+        if _html_comment_is_instruction(inner):
+            structural.append((_HTML_COMMENT_LABEL, inner[:80]))
 
     # CSS-invisible elements
     for m in _RE_CSS_HIDDEN.finditer(text):
@@ -340,6 +367,18 @@ def _extract_hidden_text(text: str) -> tuple[list[str], list[tuple[str, str]]]:
     return extracted, structural
 
 
+def _html_comment_is_instruction(comment: str) -> bool:
+    """True when an HTML comment body matches the shared instruction check."""
+    from sieve.detectors.l2_composite import _instruction_text
+
+    inner = comment.strip()
+    if inner.startswith("<!--"):
+        inner = inner[4:]
+    if inner.endswith("-->"):
+        inner = inner[:-3]
+    return bool(inner.strip()) and _instruction_text(inner)
+
+
 def _extract_base64_payloads(text: str) -> list[str]:
     """Decode base64 blobs and return plaintext for any that contain injection keywords."""
     decoded: list[str] = []
@@ -359,17 +398,58 @@ def _extract_base64_payloads(text: str) -> list[str]:
 # Core scan logic (shared by both classes)
 # ---------------------------------------------------------------------------
 
+def _command_is_negated(text: str, match: re.Match[str]) -> bool:
+    """True when one of the three tokens before *match* is a negation."""
+    prefix = text[: match.start()]
+    tokens = [token.lower() for token in re.findall(r"[A-Za-z']+", prefix)]
+    return any(token in _NEGATION_TOKENS for token in tokens[-3:])
+
+
+def _command_has_trailing_qualifier(text: str, match: re.Match[str]) -> bool:
+    """True when the target is followed by a descriptive qualifier, not an order.
+
+    ``run the command shown below`` names a command. It does not ask for one
+    to be executed. ``execute this shell command now`` does.
+    """
+    suffix = text[match.end() :]
+    tokens = [token.lower() for token in re.findall(r"[A-Za-z']+", suffix)]
+    return any(token in _TRAILING_QUALIFIERS for token in tokens[:3])
+
+
 def _score_text(text: str) -> tuple[float, list[str]]:
     """Run all INJECTION_PATTERNS against *text*.
+
+    Phrase rules also run on a copy with zero-width characters removed, so
+    ``ignore<ZW>previous<ZW>instructions`` still matches.
 
     Returns ``(raw_score, matched_labels)``.
     """
     matched_malicious: list[str] = []
     matched_suspicious: list[str] = []
+    seen: set[str] = set()
+    versions = [text]
+    # Drop zero-width marks so per-character interleaving collapses, and also
+    # treat them as spaces so "ignore<ZW>previous<ZW>instructions" stays split.
+    for variant in (_RE_ZW_CHARS.sub("", text), _RE_ZW_CHARS.sub(" ", text)):
+        if variant not in versions:
+            versions.append(variant)
 
-    for pattern, label, is_malicious in INJECTION_PATTERNS:
-        if pattern.search(text):
-            (matched_malicious if is_malicious else matched_suspicious).append(label)
+    for version in versions:
+        for pattern, label, is_malicious in INJECTION_PATTERNS:
+            if label in seen:
+                continue
+            match = pattern.search(version)
+            if not match:
+                continue
+            if label == "execute_command" and _command_has_trailing_qualifier(version, match):
+                continue
+            seen.add(label)
+            if is_malicious and label in _NEGATABLE_COMMAND_LABELS and _command_is_negated(version, match):
+                matched_suspicious.append(label)
+            elif is_malicious:
+                matched_malicious.append(label)
+            else:
+                matched_suspicious.append(label)
 
     if not matched_malicious and not matched_suspicious:
         return 0.0, []

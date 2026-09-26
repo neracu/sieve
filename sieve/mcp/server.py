@@ -1,5 +1,11 @@
 """MCP server entry point for Sieve.
 
+Every tool call enters through :func:`dispatch_tool`. Host tools that return
+externally sourced text (``github_get_issue``, pull requests, issue and review
+comments, ``web_fetch``, README reads) are scanned by
+:class:`~sieve.quarantine.wrapper.QuarantineWrapper` before the result is
+returned. The ``sieve_*`` tools remain available for explicit scans.
+
 Exposes the following MCP tools to a connected AI agent:
 
 - ``sieve_scan``         — Scan arbitrary text for prompt injection.
@@ -24,6 +30,7 @@ TODO: Install the ``mcp`` package (``pip install mcp``) and replace the
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 
@@ -41,20 +48,13 @@ log = get_logger(__name__)
 
 
 def _handle_scan(text: str, source: str = "WEB_FETCH") -> dict:
-    from sieve.quarantine.wrapper import QuarantineWrapper
+    from sieve.quarantine.wrapper import QuarantineWrapper, release_view
 
     src = ContentSource(source.upper()) if source.upper() in ContentSource._value2member_map_ else ContentSource.WEB_FETCH
     content = UntrustedContent(source=src, raw_text=text)
     wrapper = QuarantineWrapper()
     result = wrapper.process(content)
-    return {
-        "risk_level": result.final_risk_level.value,
-        "action_taken": result.action_taken.value,
-        "is_flagged": result.final_risk_level.value != "SAFE",
-        "detected_patterns": result.incident_log.detected_patterns,
-        "explanation": result.incident_log.explanation,
-        "quarantined_text": result.quarantined_text,
-    }
+    return release_view(result)
 
 
 def _handle_fetch_issue(owner: str, repo: str, issue_number: int) -> dict:
@@ -118,14 +118,14 @@ def _handle_deny(request_id: str, resolved_by: str = "operator") -> dict:
 
 
 def _scan_result_to_dict(result) -> dict:  # type: ignore[no-untyped-def]
-    return {
-        "risk_level": result.final_risk_level.value,
-        "action_taken": result.action_taken.value,
-        "is_flagged": result.final_risk_level.value != "SAFE",
-        "detected_patterns": result.incident_log.detected_patterns,
-        "explanation": result.incident_log.explanation,
-        "quarantined_text": result.quarantined_text,
-    }
+    from sieve.quarantine.wrapper import ScanResult, release_view
+
+    if isinstance(result, ScanResult):
+        return release_view(result)
+    hook = getattr(result, "_result", None)
+    if hook is not None:
+        return _hook_to_agent(hook)
+    raise TypeError(f"Cannot release result of type {type(result)!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +230,170 @@ TOOL_REGISTRY = {
 }
 
 
+class UnknownToolError(LookupError):
+    """Raised when :func:`dispatch_tool` is asked to run an unknown tool."""
+
+    def __init__(self, tool_name: str) -> None:
+        self.tool_name = tool_name
+        super().__init__(tool_name)
+
+
+def _hook_to_agent(result) -> dict:  # type: ignore[no-untyped-def]
+    """Shape a guard-hook result the way the agent consumes tool output."""
+    from sieve.core.types import HookExecutionStatus
+
+    meta = result.metadata or {}
+    reason = str(meta.get("reason", ""))
+    body = meta.get("body", result.processed_content)
+    action = {
+        HookExecutionStatus.CLEAN: "ALLOWED",
+        HookExecutionStatus.QUARANTINED: "QUARANTINED",
+        HookExecutionStatus.BLOCKED: "BLOCKED",
+    }[result.status]
+    view = {
+        "status": result.status.value,
+        "risk_level": result.detection_result.risk_level.value,
+        "risk_score": meta.get("risk_score", result.detection_result.raw_score),
+        "action_taken": action,
+        "is_flagged": result.status != HookExecutionStatus.CLEAN,
+        "detectors_fired": list(meta.get("detectors_fired") or []),
+        "detected_patterns": list(result.detection_result.detected_patterns),
+        "explanation": result.detection_result.explanation,
+        "reason": reason,
+        "approval_required": bool(meta.get("approval_required", False)),
+        "body": body,
+        "source": result.source.value,
+    }
+    if result.status == HookExecutionStatus.CLEAN and meta.get("include_original_payload", True):
+        view["original_payload"] = result.original_payload
+        view["quarantined_text"] = body
+        view["content"] = body
+    elif reason.startswith("detector_error:"):
+        view["body"] = None
+        view["content"] = None
+        view["quarantined_text"] = None
+    else:
+        view["quarantined_text"] = body
+        view["content"] = body
+    return view
+
+
+def dispatch_tool(tool_name: str, arguments: dict | None = None):  # type: ignore[no-untyped-def]
+    """Dispatch *tool_name* and quarantine external text before returning it.
+
+    Host read tools are guarded here, so the agent receives the wrapper's
+    decision whether it called ``github_get_issue`` or ``sieve_fetch_issue``.
+    """
+    from sieve.hooks.github_hook import (
+        _ISSUE_COMMENT_TOOL_NAMES,
+        _ISSUE_TOOL_NAMES,
+        _PR_COMMENT_TOOL_NAMES,
+        _PR_TOOL_NAMES,
+        GitHubGuardHook,
+    )
+    from sieve.hooks.readme_hook import _README_TOOL_NAMES, ReadmeGuardHook
+    from sieve.hooks.web_hook import _WEB_FETCH_TOOL_NAMES, WebFetchGuardHook
+
+    params = dict(arguments or {})
+    key = tool_name.strip().lower()
+    github_tools = (
+        _ISSUE_TOOL_NAMES | _PR_TOOL_NAMES | _ISSUE_COMMENT_TOOL_NAMES | _PR_COMMENT_TOOL_NAMES
+    )
+
+    if key in github_tools:
+        guarded = asyncio.run(GitHubGuardHook().intercept_read_call(tool_name, params))
+        return _hook_to_agent(guarded)
+    if key in _WEB_FETCH_TOOL_NAMES:
+        guarded = asyncio.run(WebFetchGuardHook().intercept_web_fetch_call(tool_name, params))
+        return _hook_to_agent(guarded)
+    if key in _README_TOOL_NAMES:
+        guarded = asyncio.run(ReadmeGuardHook().intercept_readme_read_call(tool_name, params))
+        return _hook_to_agent(guarded)
+
+    entry = TOOL_REGISTRY.get(tool_name)
+    if entry is None:
+        raise UnknownToolError(tool_name)
+    return entry["handler"](**params)
+
+
+def github_get_issue(owner: str, repo: str, issue_number: int) -> dict:
+    """Host tool: return a GitHub issue only after quarantine."""
+    return dispatch_tool(
+        "github_get_issue",
+        {"owner": owner, "repo": repo, "issue_number": issue_number},
+    )
+
+
+def github_get_pull_request(owner: str, repo: str, pull_number: int) -> dict:
+    """Host tool: return a GitHub pull request only after quarantine."""
+    return dispatch_tool(
+        "github_get_pull_request",
+        {"owner": owner, "repo": repo, "pull_number": pull_number},
+    )
+
+
+def web_fetch(url: str, timeout: int = 20) -> dict:
+    """Host tool: return a fetched page only after quarantine."""
+    return dispatch_tool("web_fetch", {"url": url, "timeout": timeout})
+
+
+def read_file(path: str, repo: str = "") -> dict:
+    """Host tool: return README / file text only after quarantine."""
+    return dispatch_tool("read_file", {"path": path, "repo": repo})
+
+
+def _blocked_handler_result(exc: BaseException) -> dict:
+    """Tool-call result for a failure outside ``QuarantineWrapper.process``."""
+    return {
+        "status": "BLOCKED",
+        "body": None,
+        "content": None,
+        "quarantined_text": None,
+        "reason": f"handler_error: {exc}",
+        "is_flagged": True,
+        "risk_level": "MALICIOUS",
+        "action_taken": "BLOCKED",
+    }
+
+
+def handle_stdio_request(line: str) -> dict:
+    """Run one JSON-RPC tool call and always return a result object.
+
+    Parse errors, unknown tools, and exceptions raised above ``process``
+    become ``status=BLOCKED`` on ``result``. They are not JSON-RPC errors.
+    """
+    req_id = None
+    try:
+        request = json.loads(line)
+        if not isinstance(request, dict):
+            raise TypeError("request must be a JSON object")
+        req_id = request.get("id")
+        params = request.get("params", {})
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            raise TypeError("params must be an object")
+        result = dispatch_tool(str(request.get("method", "")), params)
+        return {"jsonrpc": "2.0", "id": req_id, "result": result}
+    except Exception as exc:  # noqa: BLE001
+        log.error("Tool call failed closed.", extra={"error": str(exc)})
+        return {"jsonrpc": "2.0", "id": req_id, "result": _blocked_handler_result(exc)}
+
+
+def _serialize_response(response: dict) -> str:
+    """Encode *response*. A dump failure is itself a BLOCKED result."""
+    try:
+        return json.dumps(response) + "\n"
+    except Exception as exc:  # noqa: BLE001
+        log.error("Response serialization failed closed.", extra={"error": str(exc)})
+        fallback = {
+            "jsonrpc": "2.0",
+            "id": response.get("id"),
+            "result": _blocked_handler_result(exc),
+        }
+        return json.dumps(fallback) + "\n"
+
+
 def _stdio_loop() -> None:
     """Minimal JSON-RPC stdio loop (stub — replace with real MCP SDK)."""
     log.info("Sieve MCP server starting (stdio).")
@@ -237,21 +401,7 @@ def _stdio_loop() -> None:
         line = line.strip()
         if not line:
             continue
-        try:
-            request = json.loads(line)
-            tool_name = request.get("method", "")
-            params = request.get("params", {})
-            req_id = request.get("id")
-
-            if tool_name not in TOOL_REGISTRY:
-                response = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}}
-            else:
-                result = TOOL_REGISTRY[tool_name]["handler"](**params)
-                response = {"jsonrpc": "2.0", "id": req_id, "result": result}
-        except Exception as exc:  # noqa: BLE001
-            response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": str(exc)}}
-
-        sys.stdout.write(json.dumps(response) + "\n")
+        sys.stdout.write(_serialize_response(handle_stdio_request(line)))
         sys.stdout.flush()
 
 

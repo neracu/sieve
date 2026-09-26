@@ -382,12 +382,23 @@ class WebFetchGuardHook:
         )
 
         return HookExecutionResult(
-            status=status,
+            status=scan.status,
             source=ContentSource.WEB_FETCH,
-            original_payload={"url": url, "raw_content": raw_html_or_text},
-            processed_content=scan.quarantined_text,
+            original_payload=(
+                {"url": url, "raw_content": raw_html_or_text}
+                if scan.include_original_payload
+                else None
+            ),
+            processed_content=scan.body,
             detection_result=detection,
-            metadata=metadata,
+            metadata={
+                **metadata,
+                "reason": scan.reason,
+                "approval_required": scan.approval_required,
+                "risk_score": scan.risk_score,
+                "detectors_fired": list(scan.detectors_fired),
+                "include_original_payload": scan.include_original_payload,
+            },
         )
 
     @staticmethod

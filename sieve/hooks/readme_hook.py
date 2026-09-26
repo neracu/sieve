@@ -451,12 +451,21 @@ class ReadmeGuardHook:
         )
 
         return HookExecutionResult(
-            status=status,
+            status=scan.status,
             source=ContentSource.README,
-            original_payload={"markdown": original_markdown},
-            processed_content=scan.quarantined_text,
+            original_payload=(
+                {"markdown": original_markdown} if scan.include_original_payload else None
+            ),
+            processed_content=scan.body,
             detection_result=detection,
-            metadata=metadata,
+            metadata={
+                **metadata,
+                "reason": scan.reason,
+                "approval_required": scan.approval_required,
+                "risk_score": scan.risk_score,
+                "detectors_fired": list(scan.detectors_fired),
+                "include_original_payload": scan.include_original_payload,
+            },
         )
 
 

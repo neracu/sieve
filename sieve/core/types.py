@@ -135,10 +135,10 @@ class HookExecutionResult(BaseModel):
 
     status: HookExecutionStatus
     source: ContentSource
-    # The raw dict received from the upstream API (GitHub, etc.).
-    original_payload: dict[str, Any]
-    # Text that is safe to hand to the agent (may be quarantine-wrapped).
-    processed_content: str
+    # Present only for CLEAN results. Withheld results omit the raw payload.
+    original_payload: dict[str, Any] | None = None
+    # Text that is safe to hand to the agent. None when the body is withheld.
+    processed_content: str | None = None
     # Aggregated detection result (highest-risk detector wins).
     detection_result: DetectionResult
     metadata: dict[str, Any] = Field(default_factory=dict)

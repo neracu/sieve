@@ -82,6 +82,26 @@ _PR_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
+_ISSUE_COMMENT_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "github_list_issue_comments",
+        "github_get_issue_comments",
+        "list_issue_comments",
+        "get_issue_comments",
+        "mcp_github_list_issue_comments",
+    }
+)
+
+_PR_COMMENT_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "github_list_review_comments",
+        "github_get_pull_request_comments",
+        "list_review_comments",
+        "get_pull_request_comments",
+        "mcp_github_list_review_comments",
+    }
+)
+
 
 def _status_from_scan(scan: ScanResult) -> HookExecutionStatus:
     """Map a :class:`~sieve.quarantine.wrapper.ScanResult` to a
@@ -124,16 +144,8 @@ def _extract_issue_text(payload: dict[str, Any]) -> str:
         parts.append(f"[BODY]\n{body}")
 
     # Some callers embed a ``comments`` list directly in the payload.
-    comments = payload.get("comments") or []
-    for idx, comment in enumerate(comments, start=1):
-        if isinstance(comment, dict):
-            comment_body = (comment.get("body") or "").strip()
-            author = comment.get("user", {}).get("login", "unknown") if isinstance(comment.get("user"), dict) else "unknown"
-        else:
-            comment_body = str(comment).strip()
-            author = "unknown"
-        if comment_body:
-            parts.append(f"[COMMENT {idx} by {author}]\n{comment_body}")
+    # The GitHub issue API uses this key for a comment *count*, not the bodies.
+    _append_comment_bodies(parts, payload.get("comments"), "COMMENT")
 
     return "\n\n".join(parts)
 
@@ -156,6 +168,8 @@ def _extract_pr_text(payload: dict[str, Any]) -> str:
 
     # Optional: diff file summary list (e.g. from a pre-processed payload).
     files = payload.get("files") or payload.get("changed_files_detail") or []
+    if not isinstance(files, list):
+        files = []
     for f in files:
         if not isinstance(f, dict):
             continue
@@ -166,19 +180,57 @@ def _extract_pr_text(payload: dict[str, Any]) -> str:
         if patch:
             parts.append(f"[PATCH]\n{patch}")
 
-    # Review comments embedded in the payload.
-    comments = payload.get("review_comments") or payload.get("comments") or []
-    for idx, comment in enumerate(comments, start=1):
-        if isinstance(comment, dict):
-            comment_body = (comment.get("body") or "").strip()
-            author = comment.get("user", {}).get("login", "unknown") if isinstance(comment.get("user"), dict) else "unknown"
-        else:
-            comment_body = str(comment).strip()
-            author = "unknown"
-        if comment_body:
-            parts.append(f"[REVIEW COMMENT {idx} by {author}]\n{comment_body}")
+    # Conversation comments and review comments are separate lists. Scan both.
+    # Author and id stay in metadata so they do not sit inside the scanned text.
+    _append_comment_bodies(parts, payload.get("comments"), "COMMENT")
+    _append_comment_bodies(parts, payload.get("review_comments"), "REVIEW COMMENT")
 
     return "\n\n".join(parts)
+
+
+def _comment_body(comment: Any) -> str:
+    if isinstance(comment, dict):
+        return str(comment.get("body") or "").strip()
+    return str(comment).strip()
+
+
+def _append_comment_bodies(parts: list[str], comments: Any, label: str) -> None:
+    """Append comment bodies with separators. Author and id are not included."""
+    if not isinstance(comments, list):
+        return
+    index = 0
+    for comment in comments:
+        body = _comment_body(comment)
+        if not body:
+            continue
+        index += 1
+        parts.append(f"[{label} {index}]\n{body}")
+
+
+def _comment_refs(comments: Any) -> list[dict[str, Any]]:
+    """Author and id for the quarantine log. Empty when *comments* is a count."""
+    if not isinstance(comments, list):
+        return []
+    refs: list[dict[str, Any]] = []
+    for comment in comments:
+        if isinstance(comment, dict):
+            user = comment.get("user") if isinstance(comment.get("user"), dict) else {}
+            refs.append({"id": comment.get("id"), "author": user.get("login")})
+        else:
+            refs.append({"id": None, "author": None})
+    return refs
+
+
+def _next_page_url(link_header: str) -> str | None:
+    """Return the GitHub ``Link`` header URL marked ``rel="next"``."""
+    for part in link_header.split(","):
+        if 'rel="next"' not in part:
+            continue
+        start = part.find("<")
+        end = part.find(">")
+        if start != -1 and end > start:
+            return part[start + 1 : end]
+    return None
 
 
 def _extract_issue_metadata(payload: dict[str, Any]) -> dict[str, Any]:
@@ -202,6 +254,9 @@ def _extract_issue_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             lbl.get("name", str(lbl)) if isinstance(lbl, dict) else str(lbl)
             for lbl in (payload["labels"] or [])
         ]
+    comment_refs = _comment_refs(payload.get("comments"))
+    if comment_refs:
+        meta["comment_refs"] = comment_refs
     return meta
 
 
@@ -227,6 +282,12 @@ def _extract_pr_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         meta["base_branch"] = base["label"]
     if "changed_files" in payload:
         meta["changed_files"] = payload["changed_files"]
+    comment_refs = _comment_refs(payload.get("comments"))
+    if comment_refs:
+        meta["comment_refs"] = comment_refs
+    review_refs = _comment_refs(payload.get("review_comments"))
+    if review_refs:
+        meta["review_comment_refs"] = review_refs
     return meta
 
 
@@ -357,6 +418,8 @@ class GitHubGuardHook:
               ``fetch_issue``, ``mcp_github_get_issue``
             - PR tools: ``github_get_pull_request``, ``get_pull_request``,
               ``read_pull_request``, ``fetch_pr``, ``mcp_github_get_pull_request``
+            - Comment tools: ``github_list_issue_comments``,
+              ``github_list_review_comments``, and their aliases
 
         Args:
             tool_name:  The MCP/Bob tool name being intercepted.
@@ -397,10 +460,44 @@ class GitHubGuardHook:
             )
             return await self.inspect_pr(payload, extra_metadata={"tool_name": tool_name})
 
+        if tool_lower in _ISSUE_COMMENT_TOOL_NAMES:
+            issue_number = int(arguments.get("issue_number", arguments.get("number", 0)))
+            comments = await asyncio.get_running_loop().run_in_executor(
+                None,
+                self._fetch_issue_comments,
+                arguments["owner"],
+                arguments["repo"],
+                issue_number,
+            )
+            payload = {"number": issue_number, "title": "", "body": "", "comments": comments}
+            return await self.inspect_issue(payload, extra_metadata={"tool_name": tool_name})
+
+        if tool_lower in _PR_COMMENT_TOOL_NAMES:
+            pr_num = int(
+                arguments.get("pull_number")
+                or arguments.get("pr_number")
+                or arguments.get("number", 0)
+            )
+            comments = await asyncio.get_running_loop().run_in_executor(
+                None,
+                self._fetch_pr_comments,
+                arguments["owner"],
+                arguments["repo"],
+                pr_num,
+            )
+            payload = {
+                "number": pr_num,
+                "title": "",
+                "body": "",
+                "review_comments": comments,
+            }
+            return await self.inspect_pr(payload, extra_metadata={"tool_name": tool_name})
+
         raise ValueError(
             f"Tool '{tool_name}' is not a recognised GitHub read tool. "
             f"Known issue tools: {sorted(_ISSUE_TOOL_NAMES)}. "
-            f"Known PR tools: {sorted(_PR_TOOL_NAMES)}."
+            f"Known PR tools: {sorted(_PR_TOOL_NAMES)}. "
+            f"Known comment tools: {sorted(_ISSUE_COMMENT_TOOL_NAMES | _PR_COMMENT_TOOL_NAMES)}."
         )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -426,12 +523,19 @@ class GitHubGuardHook:
         )
 
         return HookExecutionResult(
-            status=status,
+            status=scan.status,
             source=source,
-            original_payload=original_payload,
-            processed_content=scan.quarantined_text,
+            original_payload=original_payload if scan.include_original_payload else None,
+            processed_content=scan.body,
             detection_result=detection,
-            metadata=metadata,
+            metadata={
+                **metadata,
+                "reason": scan.reason,
+                "approval_required": scan.approval_required,
+                "risk_score": scan.risk_score,
+                "detectors_fired": list(scan.detectors_fired),
+                "include_original_payload": scan.include_original_payload,
+            },
         )
 
     def _fetch_issue_payload(
@@ -442,7 +546,13 @@ class GitHubGuardHook:
         url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}"
         response = httpx.get(url, headers=self._auth_headers(), timeout=15)
         response.raise_for_status()
-        return dict(response.json())
+        payload = dict(response.json())
+        # The issue object stores a comment count. Replace it with the bodies
+        # so the combined payload is what QuarantineWrapper scans.
+        if isinstance(payload.get("comments"), int):
+            payload["comment_count"] = payload["comments"]
+        payload["comments"] = self._fetch_issue_comments(owner, repo, issue_number)
+        return payload
 
     def _fetch_pr_payload(
         self, owner: str, repo: str, pr_number: int
@@ -452,7 +562,58 @@ class GitHubGuardHook:
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
         response = httpx.get(url, headers=self._auth_headers(), timeout=15)
         response.raise_for_status()
-        return dict(response.json())
+        payload = dict(response.json())
+        if isinstance(payload.get("comments"), int):
+            payload["comment_count"] = payload["comments"]
+        if isinstance(payload.get("review_comments"), int):
+            payload["review_comment_count"] = payload["review_comments"]
+        payload["comments"] = self._fetch_issue_comments(owner, repo, pr_number)
+        payload["review_comments"] = self._fetch_pr_comments(owner, repo, pr_number)
+        payload["files"] = self._fetch_pr_files(owner, repo, pr_number)
+        return payload
+
+    def _fetch_pr_files(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        return self._fetch_json_list(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
+        )
+
+    def _fetch_issue_comments(
+        self, owner: str, repo: str, issue_number: int
+    ) -> list[dict[str, Any]]:
+        return self._fetch_json_list(
+            f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        )
+
+    def _fetch_pr_comments(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        return self._fetch_json_list(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
+        )
+
+    def _fetch_json_list(self, url: str) -> list[dict[str, Any]]:
+        import httpx
+
+        items: list[dict[str, Any]] = []
+        separator = "&" if "?" in url else "?"
+        next_url: str | None = url if "per_page=" in url else f"{url}{separator}per_page=100"
+        for _page in range(10):
+            if not next_url:
+                break
+            response = httpx.get(next_url, headers=self._auth_headers(), timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list):
+                items.extend(item for item in data if isinstance(item, dict))
+            headers = getattr(response, "headers", None) or {}
+            if hasattr(headers, "get"):
+                link = headers.get("Link") or headers.get("link") or ""
+            else:
+                link = ""
+            next_url = _next_page_url(str(link))
+        return items
 
     def _auth_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
