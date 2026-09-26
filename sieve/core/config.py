@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     l2_score_threshold: float = 0.50
     # Enable the human-approval gate for privileged actions
     approval_gate_enabled: bool = True
+    # Seconds a paused action waits before it is denied. Timeout denies.
+    approval_timeout_seconds: float = 300.0
+    # When False, a direct user instruction may run a privileged action.
+    approval_pause_on_trusted: bool = False
+    # Risk tiers that pause when the triggering content is untrusted.
+    approval_tiers: str = "low,medium,high"
     # Maximum characters of raw text stored per incident log entry
     incident_log_max_raw_chars: int = 2000
     # Path to the append-only audit log for blocked/quarantined events.

@@ -521,6 +521,9 @@ class GitHubGuardHook:
                 "patterns": scan.incident_log.detected_patterns,
             },
         )
+        from sieve.approval.approval_gate import observe_guard_hook
+
+        observe_guard_hook(scan, source.value)
 
         return HookExecutionResult(
             status=scan.status,

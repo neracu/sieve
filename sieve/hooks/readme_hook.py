@@ -449,6 +449,9 @@ class ReadmeGuardHook:
                 "patterns": scan.incident_log.detected_patterns,
             },
         )
+        from sieve.approval.approval_gate import observe_guard_hook
+
+        observe_guard_hook(scan, ContentSource.README.value)
 
         return HookExecutionResult(
             status=scan.status,

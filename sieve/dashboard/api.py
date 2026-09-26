@@ -22,6 +22,7 @@ from uuid import UUID
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from sieve.approval.approval_gate import install_approval_gate
 from sieve.approval.gate import ApprovalDeniedError, ApprovalPendingError, gate
 from sieve.core.config import settings
 from sieve.core.logger import configure_logging, get_logger
@@ -42,6 +43,7 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+install_approval_gate(app)
 
 # ---------------------------------------------------------------------------
 # In-memory incident store (TODO: replace with persistent storage)
