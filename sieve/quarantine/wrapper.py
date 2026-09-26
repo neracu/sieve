@@ -2,7 +2,8 @@
 
 The :class:`QuarantineWrapper` is the single entry point used by all hooks.
 It chains the configured detectors, makes the quarantine/allow decision, emits
-an :class:`~sieve.core.types.IncidentLog`, and returns a typed
+an :class:`~sieve.core.types.IncidentLog`, writes a forensic entry to the
+:mod:`~sieve.quarantine.audit_log`, and returns a typed
 :class:`~sieve.quarantine.wrapper.ScanResult` to the caller.
 """
 
@@ -119,24 +120,39 @@ class QuarantineWrapper:
         *,
         detectors: list | None = None,
         threshold: RiskLevel | None = None,
+        l2_score_threshold: float | None = None,
     ) -> None:
         """Initialise the wrapper.
 
         Args:
-            detectors:  Ordered list of detectors to run.  Defaults to L1
-                        plus :class:`~sieve.detectors.l2_composite.L2CompositeDetector`.
-                        :class:`~sieve.detectors.l2_watsonx.L2WatsonxDetector` is
-                        appended only when an API key is configured.
-            threshold:  Minimum :class:`~sieve.core.types.RiskLevel` that
-                        triggers quarantine.  Defaults to
-                        ``settings.quarantine_threshold``.
+            detectors:          Ordered list of detectors to run.  Defaults to
+                                L1 plus
+                                :class:`~sieve.detectors.l2_composite.L2CompositeDetector`.
+                                :class:`~sieve.detectors.l2_watsonx.L2WatsonxDetector`
+                                is appended only when an API key is configured.
+            threshold:          Minimum :class:`~sieve.core.types.RiskLevel`
+                                that triggers quarantine.  Defaults to
+                                ``settings.quarantine_threshold``.
+            l2_score_threshold: Raw composite score (0.0–1.0) at or above
+                                which the result is escalated to MALICIOUS,
+                                overriding the detector's own risk-level
+                                mapping.  Defaults to
+                                ``settings.l2_score_threshold``.
         """
+        from sieve.quarantine.audit_log import audit_logger as _default_audit
+
         if detectors is None:
             detectors = self._default_detectors()
         self._detectors = detectors
         self._threshold = threshold or _THRESHOLD_MAP.get(
             settings.quarantine_threshold.upper(), RiskLevel.SUSPICIOUS
         )
+        self._l2_score_threshold: float = (
+            l2_score_threshold
+            if l2_score_threshold is not None
+            else settings.l2_score_threshold
+        )
+        self._audit = _default_audit
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -175,7 +191,7 @@ class QuarantineWrapper:
                 },
             )
 
-        final_risk = self._aggregate_risk(results)
+        final_risk = self._aggregate_risk(results, self._l2_score_threshold)
         release = self._release(content, final_risk, results)
         if release["withhold_text"]:
             results = [_scrub_detection(result, content.raw_text) for result in results]
@@ -191,17 +207,19 @@ class QuarantineWrapper:
             "Scan complete.",
             extra={
                 "content_id": str(content.id),
-                "source": content.source,
-                "risk_level": final_risk,
-                "action": release["action"],
-                "status": release["status"],
+                "source": content.source.value,
+                "risk_level": final_risk.value,
+                "action": release["action"].value,
+                "status": release["status"].value,
+                "detectors_fired": release["detectors_fired"],
+                "risk_score": release["risk_score"],
             },
         )
 
         returned_content = (
             self._redacted_content(content) if release["withhold_text"] else content
         )
-        return ScanResult(
+        scan = ScanResult(
             content=returned_content,
             detection_results=results,
             final_risk_level=final_risk,
@@ -216,6 +234,13 @@ class QuarantineWrapper:
             detectors_fired=release["detectors_fired"],
             include_original_payload=release["include_original_payload"],
         )
+        # Write audit entry for every non-clean result (fail-safe: never
+        # let audit I/O errors bubble up to the caller).
+        try:
+            self._audit.record(scan)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Audit log record failed.", extra={"error": str(exc)})
+        return scan
 
     # ── Internals ─────────────────────────────────────────────────────────────
 
@@ -232,11 +257,23 @@ class QuarantineWrapper:
         return detectors
 
     @staticmethod
-    def _aggregate_risk(results: list[DetectionResult]) -> RiskLevel:
-        """Return the highest risk level across all detector results."""
+    def _aggregate_risk(
+        results: list[DetectionResult],
+        l2_score_threshold: float = 0.50,
+    ) -> RiskLevel:
+        """Return the highest risk level across all detector results.
+
+        If any result's ``raw_score`` meets or exceeds *l2_score_threshold*
+        the aggregated risk is escalated to ``MALICIOUS`` regardless of the
+        enum value produced by the individual detector.
+        """
         if not results:
             return RiskLevel.SAFE
-        return max(results, key=lambda r: _RISK_ORDER[r.risk_level]).risk_level
+        base = max(results, key=lambda r: _RISK_ORDER[r.risk_level]).risk_level
+        # Score-based escalation: honour configurable float threshold.
+        if any(r.raw_score >= l2_score_threshold for r in results):
+            return RiskLevel.MALICIOUS
+        return base
 
     def _release(
         self,

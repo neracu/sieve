@@ -29,10 +29,17 @@ class Settings(BaseSettings):
     # ── Sieve behaviour ───────────────────────────────────────────────────────
     # Minimum risk level that triggers quarantine ("SUSPICIOUS" or "MALICIOUS")
     quarantine_threshold: str = "SUSPICIOUS"
+    # L2 composite score threshold (0.0–1.0).  Scores at or above this value
+    # are treated as MALICIOUS regardless of the risk-level enum produced by
+    # L2CompositeDetector's own thresholds.  Set to 1.1 to disable.
+    l2_score_threshold: float = 0.50
     # Enable the human-approval gate for privileged actions
     approval_gate_enabled: bool = True
     # Maximum characters of raw text stored per incident log entry
     incident_log_max_raw_chars: int = 2000
+    # Path to the append-only audit log for blocked/quarantined events.
+    # Set to "" to disable file-based audit logging.
+    audit_log_path: str = "sieve_audit.log"
 
     # ── Dashboard / API ───────────────────────────────────────────────────────
     dashboard_host: str = "127.0.0.1"
