@@ -57,7 +57,7 @@ from typing import Any, Literal, Protocol
 import httpx
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from sieve.core.logger import get_logger
@@ -406,6 +406,17 @@ class IncidentStore:
             self._append(incident)
             return incident
 
+    def clear(self) -> None:
+        """Wipe all in-memory incidents and truncate the JSONL file to zero bytes.
+
+        Called by the ``POST /dev/reset`` endpoint so that ``GET /incidents``
+        immediately returns ``total=0`` without a server restart.
+        """
+        with self._lock:
+            self._items.clear()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text("", encoding="utf-8")
+
     def _append(self, incident: Incident) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
@@ -700,15 +711,23 @@ def create_app(
         description="Live incident feed for quarantine blocks and approval decisions.",
         lifespan=lifespan,
     )
+    demo_mode = os.environ.get("DEMO_MODE", "").strip() == "1"
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(origins),
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"] if demo_mode else ["GET"],
         allow_headers=["*"],
     )
     app.state.feed = feed
     app.state.store = store
     app.state.first_poll_timeout = first_poll_timeout
+
+    _html_path = Path(__file__).parent / "static" / "dashboard.html"
+
+    @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
+    async def serve_dashboard() -> HTMLResponse:
+        """Serve the single-file incident dashboard UI."""
+        return HTMLResponse(content=_html_path.read_text(encoding="utf-8"))
 
     @app.get("/incidents", response_model=None)
     async def list_incidents(
@@ -787,6 +806,27 @@ def create_app(
         if incident is None:
             return JSONResponse(status_code=404, content=_NOT_FOUND)
         return JSONResponse(incident.model_dump())
+
+    if demo_mode:
+        _audit_path = Path(
+            os.environ.get("SIEVE_AUDIT_LOG_PATH")
+            or os.environ.get("AUDIT_LOG_PATH")
+            or "sieve_audit.log"
+        )
+
+        @app.post("/dev/reset", response_model=None, tags=["dev"])
+        async def dev_reset(request: Request) -> JSONResponse:
+            """Clear all demo data.
+
+            Truncates the incidents JSONL file and the audit log to zero bytes
+            and wipes the in-memory incident store.  Only available when the
+            server is started with ``DEMO_MODE=1``.
+            """
+            request.app.state.store.clear()
+            _audit_path.parent.mkdir(parents=True, exist_ok=True)
+            _audit_path.write_text("", encoding="utf-8")
+            log.info("Demo reset: incidents and audit log cleared.")
+            return JSONResponse({"reset": True, "incidents": 0, "audit_entries": 0})
 
     return app
 

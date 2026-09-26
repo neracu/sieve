@@ -1,4 +1,4 @@
-.PHONY: install test lint run-dashboard clean
+.PHONY: install test lint run-dashboard reset-demo clean
 
 # ── Virtualenv helpers ────────────────────────────────────────────────────────
 VENV       := .venv
@@ -44,6 +44,10 @@ run-dashboard:
 ## run-mcp: start the MCP server (stdio transport)
 run-mcp:
 	$(PYTHON) -m sieve.mcp.server
+
+## reset-demo: truncate incidents JSONL and audit log before recording
+reset-demo:
+	$(PYTHON) scripts/reset_demo_data.py
 
 ## clean: remove build artifacts and caches
 clean:

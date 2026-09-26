@@ -362,6 +362,7 @@ def _project(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def audit_log_resource(runtime: GuardianRuntime) -> dict[str, Any]:
+    runtime.audit.refresh_from_disk()
     entries: list[dict[str, Any]] = []
     for item in runtime.audit.recent(_AUDIT_LIMIT):
         entries.append(

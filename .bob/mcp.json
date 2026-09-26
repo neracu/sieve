@@ -2,7 +2,13 @@
   "mcpServers": {
     "sieve-security-guardian": {
       "command": "${workspaceFolder}/.venv/bin/python",
-      "args": ["-m", "sieve.mcp.server"]
+      "args": [
+        "-m",
+        "sieve.mcp.server"
+      ],
+      "env": {
+        "SIEVE_AUDIT_LOG_PATH": "${workspaceFolder}/sieve_audit.log"
+      }
     }
   }
 }

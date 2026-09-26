@@ -144,6 +144,16 @@ class AuditLogger:
         window.reverse()
         return [dict(item) for item in window]
 
+    def refresh_from_disk(self) -> None:
+        """Reload the append-only log so other MCP processes are visible.
+
+        Bob's stdio server and the HTTP server used by the dashboard are
+        separate processes; both append to the same file when configured
+        with the same ``SIEVE_AUDIT_LOG_PATH``.
+        """
+        with self._lock:
+            self._load()
+
     def _load(self) -> None:
         """Read an existing log into memory. Missing or unreadable files stay empty."""
         if not self._path or self._path == _AUDIT_LOG_DISABLED:
