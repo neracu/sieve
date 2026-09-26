@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     watsonx_project_id: str = ""
     watsonx_url: str = "https://us-south.ml.cloud.ibm.com"
     watsonx_model_id: str = "ibm/granite-13b-instruct-v2"
+    # Alias expected by the task spec (GRANITE_MODEL_ID env var maps here too)
+    granite_model_id: str = "ibm/granite-13b-instruct-v2"
+    # When True, skip the live API and use a deterministic local mock classifier
+    use_mock_watsonx: bool = True
 
     # ── GitHub ────────────────────────────────────────────────────────────────
     github_token: str = ""
