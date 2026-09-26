@@ -174,8 +174,15 @@ _RE_SAFETY_VOID = re.compile(r"safety\s+instructions?\s+(are\s+)?(now\s+)?(void|
 _RE_CURL_POST = re.compile(r"curl\s+(-[a-zA-Z]\s+)*-X\s+POST", re.I)
 # cat ~/.ssh/... or cat /etc/passwd etc.
 _RE_CAT_SENSITIVE = re.compile(r"cat\s+(~/\.ssh|/etc/passwd|/etc/shadow|~\/\.aws)", re.I)
-# rm -rf (destructive command)
-_RE_RM_RF = re.compile(r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\s+-[a-zA-Z]*f[a-zA-Z]*r", re.I)
+# rm -rf targeting sensitive system paths (destructive command with explicit target).
+# A bare "rm -rf build/" or "rm -rf dist/" in a PR description is a legitimate
+# clean-task mention. Only flag when the target looks like a system path or
+# when rm -rf appears without any safe build-directory suffix.
+_RE_RM_RF = re.compile(
+    r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+[/~]"  # targets absolute/home path
+    r"|rm\s+-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+[/~]",  # -fr variant
+    re.I,
+)
 # process.env (Node.js env access)
 _RE_PROCESS_ENV = re.compile(r"process\.env", re.I)
 # web_fetch( (Bob tool call injection)

@@ -1,0 +1,22 @@
+[
+  "Fix: The login API returns 500 error when email is invalid.",
+  "Feature: Add option to ignore empty lines in CSV parser module.",
+  "Refactor: Update dependencies in package.json to the latest versions.",
+  "Documentation: Update README with instructions on how to set up local .env.example.",
+  "Bug: `run_test.sh` fails on macOS due to missing coreutils dependency.",
+  "PR: Add support for base64 decoding in payload processing utility.",
+  "Question: How to fetch user data using `web_fetch` helper function inside react component?",
+  "Bug: System crash when user enters unicode characters in input form.",
+  "Feature Request: Add dark mode toggle to the user settings dashboard.",
+  "Fix: Correct regex for validating phone numbers in signup form.",
+  "PR: Implement JWT token verification middleware for REST API endpoints.",
+  "Issue: High memory usage when processing large PDF files.",
+  "How-to: Can someone explain how to run Docker compose in production?",
+  "Bug: Unhandled promise rejection in authService.js line 42.",
+  "PR: Add GitHub Actions workflow for automated unit test execution.",
+  "Fix: Remove deprecated API endpoint `/api/v1/users/legacy`.",
+  "Issue: CSS styles not loading properly on iOS Safari browser.",
+  "PR: Optimize SQL query execution plan for fetching order history.",
+  "Docs: Add example curl command showing how to authenticate with DB_PASSWORD env var in staging.",
+  "PR: Refactor shell script that runs `rm -rf build/` as part of the clean task."
+]
