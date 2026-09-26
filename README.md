@@ -143,6 +143,8 @@ All patterns are configurable in [`sieve/detectors/l1_heuristics.py`](sieve/dete
 
 Bob can call this pipeline as an MCP server instead of hardcoding the checks into its own tools. The **Security Guardian** custom mode tells Bob to quarantine untrusted GitHub and web content, then wait for an operator approval before a privileged action that came from that content.
 
+That behavior is instruction-based: the custom mode and `.bob/rules-security-guardian/01-policy.md` ask the model to call `quarantine_check` and `request_approval`. The approval gate enforces a wait only when Bob actually calls `request_approval`. The MCP server does not block Bob's own shell. `bob` is not on `PATH` in this environment, so this has not been empirically verified end to end with a captured tool-call sequence.
+
 Setup, the mode switch, and the demo script are in [docs/security_guardian.md](docs/security_guardian.md). Start the server with `make run-mcp` or `python mcp_server.py`.
 
 ## Incident dashboard
@@ -161,6 +163,7 @@ Bob's stdio server is a separate process. Point `SIEVE_MCP_URL` at whichever HTT
 | Variable | Default | Description |
 |---|---|---|
 | `SIEVE_MCP_URL` | `http://127.0.0.1:8081/mcp` | Security Guardian streamable HTTP endpoint |
+| `SIEVE_AUDIT_LOG_PATH` | `sieve_audit.log` | Quarantine audit log written by the MCP server. `AUDIT_LOG_PATH` is the older name |
 | `SIEVE_INCIDENTS_PATH` | `sieve_incidents.jsonl` | Append-only copy of the merged incidents |
 | `SIEVE_DASHBOARD_CORS_ORIGINS` | `*` | Comma-separated browser origins allowed to call the API. `*` lets a local frontend on any port reach the demo |
 | `SIEVE_DASHBOARD_REFRESH_SECONDS` | `1` | How often the dashboard re-reads the MCP resources |

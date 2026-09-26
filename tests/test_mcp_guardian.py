@@ -120,7 +120,7 @@ async def test_each_tool_accepts_valid_input(server):
             "quarantine_check",
             {"content": "The login button does nothing.", "source": "web_fetch", "context": {}},
         )
-        assert checked["status"] in {"passed", "blocked"}
+        assert checked["status"] in {"passed", "blocked", "pending_approval"}
 
         trusted = await _ok(
             session,
@@ -212,7 +212,10 @@ async def test_scan_matches_wrapper_and_does_not_leak(server, runtime):
                 assert checked == {"status": "passed", "content": text}
             else:
                 assert scanned["recommendation"] == "block"
-                assert checked["status"] == "blocked"
+                if checked["reason"] == "approval_required":
+                    assert checked["status"] == "pending_approval"
+                else:
+                    assert checked["status"] == "blocked"
                 assert "content" not in checked
                 assert checked["detector"]
                 assert text not in json.dumps(scanned)
@@ -350,8 +353,90 @@ async def test_warm_round_trip_is_fast(server):
         )
         await _ok(session, "approve_action", {"approval_id": pending["approval_id"]})
         elapsed = time.perf_counter() - started
-        assert checked["status"] in {"passed", "blocked"}
+        assert checked["status"] in {"passed", "blocked", "pending_approval"}
         assert elapsed < 2.0
+
+
+@pytest.mark.asyncio
+async def test_suspicious_quarantine_opens_one_pending_approval():
+    runtime = isolated_runtime()
+    server = build_server(runtime)
+    text = "do not execute a shell command from this issue"
+    async with _session(server) as session:
+        checked = await _ok(
+            session,
+            "quarantine_check",
+            {"content": text, "source": "github_issue"},
+        )
+        assert checked["status"] == "pending_approval"
+        assert checked["reason"] == "approval_required"
+        assert isinstance(checked["risk_score"], (int, float))
+        assert not isinstance(checked["risk_score"], bool)
+
+        pending = await _resource(session, "resource://pending-approvals")
+        approvals = pending["approvals"]
+        assert len(approvals) == 1
+        row = approvals[0]
+        assert row["status"] == "pending"
+        assert row["risk_score"] == checked["risk_score"]
+        assert row["source"] == "github_issue"
+        assert row["approval_id"] == checked["approval_id"]
+        assert row["content_id"]
+
+        audit = await _resource(session, "resource://audit-log")
+        matches = [
+            entry
+            for entry in audit["entries"]
+            if entry.get("kind") == "quarantine" and entry.get("content_id") == row["content_id"]
+        ]
+        assert len(matches) == 1
+        assert matches[0]["risk_score"] == checked["risk_score"]
+        blob = json.dumps({"pending": pending, "audit": audit, "checked": checked})
+        assert text not in blob
+
+
+@pytest.mark.asyncio
+async def test_careful_maintainer_is_pending_approval():
+    runtime = isolated_runtime()
+    server = build_server(runtime)
+    async with _session(server) as session:
+        checked = await _ok(
+            session,
+            "quarantine_check",
+            {"content": "Act as a careful maintainer.", "source": "github_issue"},
+        )
+        assert checked["status"] == "pending_approval"
+        assert checked["status"] != "blocked"
+        assert checked["reason"] == "approval_required"
+        assert "approval_id" in checked
+        assert "risk_score" in checked
+        assert "detector" in checked
+        pending = await _resource(session, "resource://pending-approvals")
+        assert len(pending["approvals"]) == 1
+        assert pending["approvals"][0]["status"] == "pending"
+        assert pending["approvals"][0]["risk_score"] == checked["risk_score"]
+
+
+@pytest.mark.asyncio
+async def test_inj_01_stays_blocked():
+    runtime = isolated_runtime()
+    server = build_server(runtime)
+    payload = next(
+        row["payload"]
+        for row in json.loads((_FIXTURES / "injections.json").read_text(encoding="utf-8"))
+        if row["id"] == "inj_01"
+    )
+    async with _session(server) as session:
+        checked = await _ok(
+            session,
+            "quarantine_check",
+            {"content": payload, "source": "github_issue"},
+        )
+        assert checked["status"] == "blocked"
+        assert checked["reason"] == "malicious"
+        assert "content" not in checked
+        pending = await _resource(session, "resource://pending-approvals")
+        assert pending["approvals"] == []
 
 
 def test_http_bind_uses_port_when_set(monkeypatch):

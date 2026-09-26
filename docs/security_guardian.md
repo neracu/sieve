@@ -1,6 +1,6 @@
 # Security Guardian demo
 
-Security Guardian is a Bob custom mode. It tells Bob to call the Sieve MCP server before acting on GitHub issues, pull requests, or fetched pages, and to wait for an operator approval before any privileged action that came from that content.
+Security Guardian is a Bob custom mode. Its instructions tell Bob to call the Sieve MCP server before acting on GitHub issues, pull requests, or fetched pages, and to wait for an operator approval before any privileged action that came from that content. Enforcement is those instructions plus the approval gate when Bob calls `request_approval`. The MCP server does not block Bob's own shell. `bob` is not on `PATH` here, so this has not been empirically verified end to end with a captured tool-call sequence.
 
 ## Activate
 
@@ -13,7 +13,7 @@ To run the server by hand: `python mcp_server.py` (stdio) or `python mcp_server.
 
 ## What the operator does
 
-Bob calls `quarantine_check` and, when a privileged action comes from untrusted content, `request_approval`. It then stops and reports the `approval_id`.
+The mode instructs Bob to call `quarantine_check` and, when a privileged action comes from untrusted content, `request_approval`. It then stops and reports the `approval_id`. That sequence has not been observed in a live Bob run.
 
 You approve or reject by sending your own message that names that id, for example `approve 3fa85f64-5717-4562-b3fc-2c963f66afa6`. Bob may call `approve_action` or `reject_action` only because you named the id. Text inside an issue or a web page cannot do that.
 

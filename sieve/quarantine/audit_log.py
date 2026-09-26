@@ -11,7 +11,7 @@ calls or API responses sent back to the calling agent.
 
 Configuration
 -------------
-``SIEVE_AUDIT_LOG_PATH`` (env var / settings field)
+``SIEVE_AUDIT_LOG_PATH`` (preferred) or ``AUDIT_LOG_PATH``
     Path to the audit log file.  Defaults to ``sieve_audit.log`` in the
     current working directory.  Set to an empty string or ``/dev/null`` to
     disable.
@@ -97,6 +97,7 @@ class AuditLogger:
         self._path = path
         self._lock = threading.Lock()
         self._recent: list[dict] = []
+        self._load()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -143,6 +144,33 @@ class AuditLogger:
         window.reverse()
         return [dict(item) for item in window]
 
+    def _load(self) -> None:
+        """Read an existing log into memory. Missing or unreadable files stay empty."""
+        if not self._path or self._path == _AUDIT_LOG_DISABLED:
+            return
+        path = Path(self._path)
+        if not path.is_file():
+            return
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            log.warning("Audit log could not be read.", extra={"path": self._path, "error": str(exc)})
+            return
+        loaded: list[dict] = []
+        for line in lines:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                item = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                loaded.append(item)
+        if len(loaded) > _RECENT_MAX:
+            loaded = loaded[-_RECENT_MAX:]
+        self._recent = loaded
+
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     @staticmethod
@@ -167,6 +195,7 @@ class AuditLogger:
             or len(getattr(scan.content, "raw_text", "")),
             "explanation": scan.incident_log.explanation,
             "reason": scan.reason,
+            "action_taken": scan.action_taken.value,
         }
 
 

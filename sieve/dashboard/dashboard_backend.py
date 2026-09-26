@@ -11,10 +11,10 @@ and would not wake stream clients. The refresh loop does both: ``GET
 server-sent events when an incident is created or updated.
 
 The in-memory dict is the runtime source of truth. Each create or change
-is appended to a JSONL file so a dashboard restart can restore incidents
-and merge them with the next successful poll. While the MCP server is
-unreachable the HTTP endpoints return 503 and the stream emits
-``mcp_status`` instead of serving a stale list as if it were live.
+is flushed to a JSONL file before it is visible, so a restart restores
+history without a live MCP call. ``GET /incidents`` and ``GET /incidents/{id}``
+read that store directly. While the MCP server is unreachable,
+``GET /incidents/summary`` returns 503 and the stream emits ``mcp_status``.
 
 Environment
 -----------
@@ -86,7 +86,7 @@ _APPROVALS = {
     "timed_out": ("approval_timed_out", "timed_out"),
 }
 _TERMINAL = {"approved", "rejected", "timed_out"}
-_STATUSES = ("blocked", "pending", "approved", "rejected", "timed_out")
+_STATUSES = ("blocked", "pending_approval", "pending", "approved", "rejected", "timed_out")
 _TYPES = (
     "quarantine_block",
     "approval_pending",
@@ -108,7 +108,14 @@ IncidentType = Literal[
     "approval_rejected",
     "approval_timed_out",
 ]
-IncidentStatus = Literal["blocked", "pending", "approved", "rejected", "timed_out"]
+IncidentStatus = Literal[
+    "blocked",
+    "pending_approval",
+    "pending",
+    "approved",
+    "rejected",
+    "timed_out",
+]
 DetectorLabel = Literal["L1", "L2", "both"]
 
 
@@ -232,6 +239,18 @@ def _summary(value: Any) -> str:
     return _bound(value)
 
 
+def _quarantine_status(row: dict[str, Any], event: str, reason: str) -> IncidentStatus:
+    """Map wrapper action_taken onto the incident status."""
+    action = str(row.get("action_taken") or "").strip().upper()
+    if action == "PENDING_APPROVAL":
+        return "pending_approval"
+    if action == "BLOCKED":
+        return "blocked"
+    if action == "QUARANTINED" or reason.strip().lower() == "approval_required" or event == "QUARANTINED":
+        return "pending_approval"
+    return "blocked"
+
+
 def normalize_audit_entry(row: dict[str, Any]) -> Incident | None:
     """Turn one audit-log row into an incident, or None when it is not one."""
     if not isinstance(row, dict):
@@ -258,7 +277,7 @@ def normalize_audit_entry(row: dict[str, Any]) -> Incident | None:
         risk_tier=None,
         context_summary=_bound(reason),
         timestamp=timestamp,
-        status="blocked",
+        status=_quarantine_status(row, event, reason),
     )
 
 
@@ -375,10 +394,14 @@ class IncidentStore:
             current = self._items.get(incident.id)
             if current is not None and current.status in _TERMINAL and incident.status == "pending":
                 return None
+            if (
+                current is not None
+                and current.status == incident.status
+                and current.type == incident.type
+            ):
+                return None
             if current is not None and not incident.context_summary:
                 incident = incident.model_copy(update={"context_summary": current.context_summary})
-            if current is not None and current.model_dump() == incident.model_dump():
-                return None
             self._items[incident.id] = incident
             self._append(incident)
             return incident
@@ -507,6 +530,7 @@ class IncidentFeed:
         self._stop = asyncio.Event()
         self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
         self._sub_lock = threading.Lock()
+        self._emitted: set[tuple[str, str]] = set()
 
     async def run(self) -> None:
         failure_streak = 0
@@ -519,9 +543,11 @@ class IncidentFeed:
                 self.mcp_ok = True
                 failure_streak = 0
                 if recovered:
-                    self._broadcast({"event": "snapshot", "data": self.store.snapshot()})
+                    snapshot = self.store.snapshot()
+                    self._remember(snapshot["incidents"])
+                    self._broadcast({"event": "snapshot", "data": snapshot})
                 else:
-                    for incident in changed:
+                    for incident in self._novel(changed):
                         self._broadcast({"event": "upsert", "data": incident.model_dump()})
             except Exception:
                 log.warning("MCP refresh failed.", extra={"error_type": "mcp_unavailable"})
@@ -567,6 +593,25 @@ class IncidentFeed:
         if self.mcp_ok is True:
             return {"event": "snapshot", "data": self.store.snapshot()}
         return {"event": "mcp_status", "data": dict(MCP_UNAVAILABLE)}
+
+    def _remember(self, incidents: list[dict[str, Any]]) -> None:
+        """Record id and status pairs already handed to subscribers."""
+        for item in incidents:
+            incident_id = item.get("id")
+            status = item.get("status")
+            if isinstance(incident_id, str) and isinstance(status, str):
+                self._emitted.add((incident_id, status))
+
+    def _novel(self, incidents: list[Incident]) -> list[Incident]:
+        """Return incidents whose id and status have not been emitted yet."""
+        fresh: list[Incident] = []
+        for incident in incidents:
+            key = (incident.id, incident.status)
+            if key in self._emitted:
+                continue
+            self._emitted.add(key)
+            fresh.append(incident)
+        return fresh
 
     def _broadcast(self, event: dict[str, Any]) -> None:
         with self._sub_lock:
@@ -675,9 +720,6 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ) -> JSONResponse:
-        blocked = await _unavailable(request)
-        if blocked is not None:
-            return blocked
         cutoff, error = _since(since)
         if error is not None:
             return error
@@ -741,9 +783,6 @@ def create_app(
 
     @app.get("/incidents/{incident_id}", response_model=None)
     async def get_incident(incident_id: str, request: Request) -> JSONResponse:
-        blocked = await _unavailable(request)
-        if blocked is not None:
-            return blocked
         incident = request.app.state.store.get(incident_id)
         if incident is None:
             return JSONResponse(status_code=404, content=_NOT_FOUND)

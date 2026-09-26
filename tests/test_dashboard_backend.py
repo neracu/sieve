@@ -63,14 +63,16 @@ def _block(
     score: float = 0.91,
     timestamp: str = _T2,
     reason: str = "malicious",
+    event: str = "BLOCKED",
+    action_taken: str | None = None,
 ) -> dict:
-    return {
+    row = {
         "kind": "quarantine",
         "timestamp": timestamp,
         "source": source,
-        "decision": "BLOCKED",
+        "decision": event,
         "detector": detector,
-        "outcome": "BLOCKED",
+        "outcome": event,
         "content_id": content_id,
         "risk_score": score,
         "reason": reason,
@@ -78,6 +80,9 @@ def _block(
         "raw_text": _SECRET,
         "content": _SECRET,
     }
+    if action_taken is not None:
+        row["action_taken"] = action_taken
+    return row
 
 
 def _pending(
@@ -140,7 +145,16 @@ def _feed() -> tuple[dict, dict]:
     audit = {
         "entries": [
             _block(_BLOCK, source="GITHUB_ISSUE", detector="L1", score=0.91, timestamp=_T2),
-            _block(_BLOCK_B, source="WEB_FETCH", detector="L2", score=0.4, timestamp=_T0, reason="approval_required"),
+            _block(
+                _BLOCK_B,
+                source="WEB_FETCH",
+                detector="L2",
+                score=0.4,
+                timestamp=_T0,
+                reason="approval_required",
+                event="QUARANTINED",
+                action_taken="PENDING_APPROVAL",
+            ),
             _approval(_APPROVED, "approved", timestamp=_T3, action="file_write", summary="Write the patch."),
             _approval(_REJECTED, "rejected", timestamp=_T4, action="file_delete", summary="Remove the file."),
             _approval(_APPROVAL, "allowed", timestamp=_T4, action="read_file", summary="should be skipped"),
@@ -225,8 +239,14 @@ def test_list_filters_pagination_and_sort(tmp_path: Path):
         assert _SECRET not in listed.text
 
         blocked = client.get("/incidents", params={"status": "blocked"}).json()
-        assert blocked["total"] == 2
+        assert blocked["total"] == 1
+        assert blocked["incidents"][0]["id"] == _BLOCK
         assert {item["status"] for item in blocked["incidents"]} == {"blocked"}
+
+        waiting = client.get("/incidents", params={"status": "pending_approval"}).json()
+        assert waiting["total"] == 1
+        assert waiting["incidents"][0]["id"] == _BLOCK_B
+        assert waiting["incidents"][0]["status"] == "pending_approval"
 
         pending = client.get("/incidents", params={"type": "approval_pending"}).json()
         assert pending["total"] == 1
@@ -264,12 +284,89 @@ def test_list_filters_pagination_and_sort(tmp_path: Path):
         summary = client.get("/incidents/summary")
         assert summary.status_code == 200
         counts = summary.json()
-        assert counts["by_status"]["blocked"] == 2
+        assert counts["by_status"]["blocked"] == 1
+        assert counts["by_status"]["pending_approval"] == 1
         assert counts["by_status"]["pending"] == 1
         assert counts["by_status"]["approved"] == 1
         assert counts["by_status"]["rejected"] == 1
         assert counts["by_source"]["github_issue"] == 3
         assert _SECRET not in summary.text
+
+
+def test_malicious_and_suspicious_incidents_have_distinct_statuses(tmp_path: Path):
+    from sieve.approval.approval_gate import ApprovalGate
+    from sieve.core.types import (
+        ActionTaken,
+        ContentSource,
+        DetectionResult,
+        RiskLevel,
+        UntrustedContent,
+    )
+    from sieve.mcp.guardian import GuardianRuntime, audit_log_resource
+    from sieve.quarantine.audit_log import AuditLogger
+    from sieve.quarantine.wrapper import QuarantineWrapper
+
+    class _Fixed:
+        def __init__(self, risk: RiskLevel, score: float, name: str) -> None:
+            self._risk = risk
+            self._score = score
+            self._name = name
+
+        def scan(self, content: UntrustedContent) -> DetectionResult:
+            return DetectionResult(
+                content_id=content.id,
+                is_flagged=True,
+                risk_level=self._risk,
+                detected_patterns=["stub"],
+                raw_score=self._score,
+                explanation="stub",
+                detector_name=self._name,
+            )
+
+    audit = AuditLogger(path="")
+    malicious_wrapper = QuarantineWrapper(
+        detectors=[_Fixed(RiskLevel.MALICIOUS, 0.91, "L1HeuristicDetector")],
+        audit_logger=audit,
+    )
+    suspicious_wrapper = QuarantineWrapper(
+        detectors=[_Fixed(RiskLevel.SUSPICIOUS, 0.40, "L2CompositeDetector")],
+        audit_logger=audit,
+    )
+    malicious = malicious_wrapper.process(
+        UntrustedContent(source=ContentSource.GITHUB_ISSUE, raw_text="malicious payload")
+    )
+    suspicious = suspicious_wrapper.process(
+        UntrustedContent(source=ContentSource.WEB_FETCH, raw_text="suspicious payload")
+    )
+    assert malicious.action_taken == ActionTaken.BLOCKED
+    assert suspicious.action_taken == ActionTaken.PENDING_APPROVAL
+
+    runtime = GuardianRuntime(
+        wrapper=malicious_wrapper,
+        gate=ApprovalGate(audit_path=""),
+        audit_logger=audit,
+    )
+    payload = audit_log_resource(runtime)
+    actions = {entry["content_id"]: entry.get("action_taken") for entry in payload["entries"]}
+    assert actions[str(malicious.content.id)] == "BLOCKED"
+    assert actions[str(suspicious.content.id)] == "PENDING_APPROVAL"
+
+    source = FakeSource(payload, {"approvals": []})
+    with TestClient(_app(tmp_path, source)) as client:
+        body = client.get("/incidents").json()
+        by_id = {item["id"]: item for item in body["incidents"]}
+        assert by_id[str(malicious.content.id)]["status"] == "blocked"
+        assert by_id[str(suspicious.content.id)]["status"] == "pending_approval"
+
+        blocked = client.get("/incidents", params={"status": "blocked"}).json()
+        assert blocked["total"] == 1
+        assert blocked["incidents"][0]["id"] == str(malicious.content.id)
+        assert blocked["incidents"][0]["status"] == "blocked"
+
+        waiting = client.get("/incidents", params={"status": "pending_approval"}).json()
+        assert waiting["total"] == 1
+        assert waiting["incidents"][0]["id"] == str(suspicious.content.id)
+        assert waiting["incidents"][0]["status"] == "pending_approval"
 
 
 def test_restart_restores_incidents_from_jsonl(tmp_path: Path):
@@ -335,8 +432,70 @@ def test_stream_snapshot_then_upserts(tmp_path: Path):
     assert _SECRET not in body
 
 
+def _sse_events(body: str, name: str) -> list[dict]:
+    events: list[dict] = []
+    current: str | None = None
+    for line in body.splitlines():
+        if line.startswith("event: "):
+            current = line[7:]
+        elif line.startswith("data: ") and current == name:
+            events.append(json.loads(line[6:]))
+            current = None
+    return events
+
+
+def _jsonl_lines(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_stream_emits_new_quarantines_once(tmp_path: Path):
+    path = tmp_path / "incidents.jsonl"
+    source = FakeSource({"entries": []}, {"approvals": [_pending()]})
+    malicious = _block(_BLOCK, action_taken="BLOCKED")
+    suspicious = _block(
+        _BLOCK_B,
+        source="WEB_FETCH",
+        detector="L2",
+        score=0.4,
+        timestamp=_T0,
+        reason="approval_required",
+        event="QUARANTINED",
+        action_taken="PENDING_APPROVAL",
+    )
+    seen: dict[str, int] = {}
+
+    def publish() -> None:
+        time.sleep(0.35)
+        seen["before"] = len(_jsonl_lines(path))
+        with source.lock:
+            source.audit = {"entries": [malicious, suspicious]}
+            source.pending = {"approvals": [_pending()]}
+
+    application = create_app(
+        source=source,
+        incidents_path=path,
+        refresh_seconds=0.05,
+        first_poll_timeout=1.0,
+    )
+    with TestClient(application) as client:
+        threading.Thread(target=publish, daemon=True).start()
+        response = client.get("/incidents/stream", params={"max_seconds": 1.2})
+
+    assert response.status_code == 200
+    assert seen["before"] == 1
+    assert len(_jsonl_lines(path)) == seen["before"] + 2
+    upserts = _sse_events(response.text, "upsert")
+    by_id = {item["id"]: item for item in upserts}
+    assert by_id[_BLOCK]["status"] == "blocked"
+    assert by_id[_BLOCK_B]["status"] == "pending_approval"
+    assert _APPROVAL not in by_id
+    assert response.text.count(_APPROVAL) == 1
+
+
 def test_responses_do_not_leak_raw_content(tmp_path: Path):
-    poisoned = _block(reason="malicious")
+    poisoned = _block("66666666-6666-4666-8666-666666666666", reason="malicious")
     poisoned["detected_patterns"] = [_SECRET]
     poisoned["source"] = _SECRET
     source = FakeSource(
@@ -358,20 +517,42 @@ def test_responses_do_not_leak_raw_content(tmp_path: Path):
         assert _SECRET not in streamed.text
 
 
+def test_history_is_readable_while_mcp_is_down(tmp_path: Path):
+    path = tmp_path / "incidents.jsonl"
+    source = FakeSource({"entries": [_block()]}, {"approvals": []})
+    with TestClient(create_app(source=source, incidents_path=path, refresh_seconds=0.05)) as client:
+        seeded = client.get("/incidents")
+        assert seeded.status_code == 200
+        assert seeded.json()["total"] == 1
+    down = FakeSource(fail=True)
+    with TestClient(create_app(source=down, incidents_path=path, refresh_seconds=0.05)) as client:
+        listed = client.get("/incidents")
+        assert listed.status_code == 200
+        body = listed.json()
+        assert body["total"] == 1
+        assert body["incidents"][0]["id"] == _BLOCK
+        one = client.get(f"/incidents/{_BLOCK}")
+        assert one.status_code == 200
+        assert one.json()["id"] == _BLOCK
+        assert one.json()["status"] == "blocked"
+
+
 def test_mcp_unavailable_returns_503_and_stream_status(tmp_path: Path):
     source = FakeSource(fail=True)
     with TestClient(_app(tmp_path, source)) as client:
-        failed = client.get("/incidents")
-        assert failed.status_code == 503
-        assert failed.json() == {
+        listed = client.get("/incidents")
+        assert listed.status_code == 200
+        assert listed.json() == {"incidents": [], "total": 0}
+        missing = client.get("/incidents/99999999-9999-4999-8999-999999999999")
+        assert missing.status_code == 404
+        assert missing.json() == {"error": "not_found", "message": "Incident not found."}
+        summary = client.get("/incidents/summary")
+        assert summary.status_code == 503
+        assert summary.json() == {
             "error": "mcp_unavailable",
             "message": "MCP server is unreachable.",
         }
-        again = client.get("/incidents/99999999-9999-4999-8999-999999999999")
-        assert again.status_code == 503
-        assert client.get("/incidents/summary").status_code == 503
         streamed = client.get("/incidents/stream", params={"max_seconds": 0.2})
         assert streamed.status_code == 200
         assert "event: mcp_status" in streamed.text
         assert "mcp_unavailable" in streamed.text
-        assert client.get("/incidents").status_code == 503

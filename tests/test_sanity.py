@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from sieve.core.config import settings
+from sieve.core.config import Settings, settings
 from sieve.core.types import (
     ActionTaken,
     ApprovalRequest,
@@ -38,6 +38,19 @@ class TestSettings:
 
     def test_incident_log_max_raw_chars_positive(self):
         assert settings.incident_log_max_raw_chars > 0
+
+    def test_sieve_audit_log_path_is_preferred(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("SIEVE_AUDIT_LOG_PATH", "custom/sieve_audit.log")
+        monkeypatch.delenv("AUDIT_LOG_PATH", raising=False)
+        loaded = Settings()
+        assert loaded.audit_log_path == "custom/sieve_audit.log"
+        assert loaded.audit_log_path != ""
+
+    def test_audit_log_path_falls_back_to_old_name(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("SIEVE_AUDIT_LOG_PATH", raising=False)
+        monkeypatch.setenv("AUDIT_LOG_PATH", "legacy/sieve_audit.log")
+        loaded = Settings()
+        assert loaded.audit_log_path == "legacy/sieve_audit.log"
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +12,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     # ── IBM watsonx.ai ────────────────────────────────────────────────────────
@@ -44,8 +46,12 @@ class Settings(BaseSettings):
     # Maximum characters of raw text stored per incident log entry
     incident_log_max_raw_chars: int = 2000
     # Path to the append-only audit log for blocked/quarantined events.
+    # SIEVE_AUDIT_LOG_PATH is preferred. AUDIT_LOG_PATH is the older name.
     # Set to "" to disable file-based audit logging.
-    audit_log_path: str = "sieve_audit.log"
+    audit_log_path: str = Field(
+        default="sieve_audit.log",
+        validation_alias=AliasChoices("SIEVE_AUDIT_LOG_PATH", "AUDIT_LOG_PATH"),
+    )
 
     # ── Dashboard / API ───────────────────────────────────────────────────────
     dashboard_host: str = "127.0.0.1"

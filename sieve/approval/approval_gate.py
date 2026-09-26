@@ -128,6 +128,7 @@ class _Pending:
         raw_content: str | None,
         created_at: datetime,
         expires_at: datetime,
+        risk_score: float | None = None,
     ) -> None:
         self.approval_id = str(uuid4())
         self.spec = spec
@@ -138,6 +139,7 @@ class _Pending:
         self.raw_content = raw_content
         self.created_at = created_at
         self.expires_at = expires_at
+        self.risk_score = _optional_score(risk_score)
         self.status = "pending_approval"
         self.approver: str | None = None
         self.result: Any = None
@@ -163,6 +165,10 @@ class _Pending:
             "approval_id": self.approval_id,
             "requested_at": self.created_at.isoformat(),
         }
+        if self.risk_score is not None:
+            payload["risk_score"] = self.risk_score
+        if self.provenance.content_id:
+            payload["content_id"] = self.provenance.content_id
         if self.status == "approved":
             payload["result"] = self.result
         return payload
@@ -198,6 +204,9 @@ register_privileged_action("file_write", "medium", "Write or overwrite a file")
 register_privileged_action("file_delete", "high", "Delete a file or directory")
 register_privileged_action("git_commit", "medium", "Create a git commit")
 register_privileged_action("git_push", "high", "Push commits to a remote, including main")
+register_privileged_action("shell", "high", "Run a shell command")
+register_privileged_action("shell_exec", "high", "Execute a shell command")
+register_privileged_action("run_command", "high", "Run a command in a shell")
 register_privileged_action(
     "send_message",
     "medium",
@@ -375,6 +384,7 @@ class ApprovalGate:
         mode: str = "async",
         raw_content: str | None = None,
         context_summary: str | None = None,
+        risk_score: float | None = None,
         **kwargs: Any,
     ) -> Any:
         """Run *fn* or pause it.
@@ -386,6 +396,9 @@ class ApprovalGate:
         *context_summary*, when set, replaces the generated summary after it
         is collapsed to one line, capped, and scrubbed. The action's risk
         tier still comes from the registry, not from the caller.
+
+        *risk_score*, when set, is copied onto the pending payload. It is
+        omitted when the caller does not supply one.
         """
         spec = self.resolve(action_id)
         origin = self._resolve_provenance(provenance)
@@ -414,6 +427,7 @@ class ApprovalGate:
             raw_content=raw_content if isinstance(raw_content, str) else None,
             created_at=created,
             expires_at=created + timedelta(seconds=seconds),
+            risk_score=risk_score,
         )
         if context_summary is not None and str(context_summary).strip():
             record.context_summary = _bound_summary(str(context_summary), record.raw_content)
@@ -795,6 +809,13 @@ def install_approval_gate(app: FastAPI, gate: ApprovalGate | None = None) -> App
     app.include_router(build_router(active))
     app.add_middleware(SieveProvenanceMiddleware)
     return active
+
+
+def _optional_score(value: float | None) -> float | None:
+    """Keep a numeric risk score. Booleans and other types are dropped."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _safe_content_id(value: str | None) -> str | None:

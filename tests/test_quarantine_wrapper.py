@@ -431,6 +431,15 @@ class TestAuditLog:
         entry = json.loads(log_file.read_text().splitlines()[0])
         assert "content_id" in entry
 
+    def test_fresh_logger_loads_persisted_entries(self, tmp_path):
+        from sieve.quarantine.audit_log import AuditLogger
+
+        wrapper, log_file = self._make_wrapper_with_log(tmp_path)
+        wrapper.process(_make_content(_INJECTION))
+        wrapper.process(_make_content(_INJECTION + " again"))
+        reloaded = AuditLogger(path=str(log_file))
+        assert len(reloaded.recent()) == 2
+
     def test_audit_log_disabled_when_path_is_empty(self, tmp_path):
         from sieve.quarantine.audit_log import AuditLogger
 
